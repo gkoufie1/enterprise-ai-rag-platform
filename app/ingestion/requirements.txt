@@ -1,0 +1,2 @@
+# Bundled so the S3 Vectors client is guaranteed to exist, whatever boto3 the Lambda runtime ships.
+boto3>=1.44

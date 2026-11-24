@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (git-ignored) and adjust.
+aws_region      = "us-east-1"
+alarm_email     = "you@example.com"
+allowed_origins = ["http://localhost:3000"]
+
+# Claude model on Amazon Bedrock. Opus 5.5 is the default; Sonnet 5.5 is a cheaper option:
+# claude_model_id = "anthropic.claude-sonnet-5-5"
+# claude_effort   = "low"
+
+# Dev convenience: let `terraform destroy` remove buckets that still hold data.
+force_destroy = true

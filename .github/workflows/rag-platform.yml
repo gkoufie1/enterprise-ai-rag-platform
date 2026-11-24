@@ -1,0 +1,96 @@
+name: Enterprise AI RAG Platform CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest
+
+  terraform:
+    name: Terraform fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive terraform
+      - name: Validate dev environment
+        working-directory: terraform/environments/dev
+        run: terraform init -backend=false -input=false && terraform validate
+      - name: Validate bootstrap
+        working-directory: terraform/bootstrap
+        run: terraform init -backend=false -input=false && terraform validate
+
+  security-scan:
+    name: Checkov IaC scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          quiet: true
+          # Report findings without failing the build; tighten once the baseline is reviewed.
+          soft_fail: true
+
+  plan:
+    name: Terraform plan (dev)
+    # Runs once the AWS_PLAN_ROLE_ARN and TF_STATE_BUCKET repository variables are set
+    # (outputs of terraform/bootstrap). The role is read-only, so plan runs without a lock.
+    if: vars.AWS_PLAN_ROLE_ARN != ''
+    needs: [python, terraform]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build Lambda packages
+        run: bash scripts/build_lambdas.sh
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform init
+        working-directory: terraform/environments/dev
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          -backend-config="key=enterprise-ai-rag/dev/terraform.tfstate"
+          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="encrypt=true"
+          -backend-config="use_lockfile=true"
+      - name: Terraform plan
+        working-directory: terraform/environments/dev
+        run: |
+          terraform plan -input=false -lock=false -no-color -var="aws_region=${AWS_REGION}" | tee plan.txt
+          {
+            echo '### Terraform plan (dev)'
+            echo '```'
+            tail -n 60 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
