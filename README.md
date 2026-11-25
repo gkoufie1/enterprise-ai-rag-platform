@@ -21,7 +21,13 @@ Policies, runbooks and onboarding guides are spread across wikis and drives. Peo
 
 **Try it:** https://d1oaspqgya82kd.cloudfront.net. The demo login is shown on the sign-in page and allows 30 questions a day.
 
+<img src="docs/screenshots/02-chat-answer-citations.png" alt="Chat answer: personal laptops may not be used for customer data, with the cited sentence from remote-work-policy.md" width="820">
+
+*Every answer cites the exact passage it is based on, here the "Equipment and security" section of the remote work policy.*
+
 <img src="docs/screenshots/01-sign-in.png" alt="Sign-in page of the Knowledge Assistant with the demo login" width="820">
+
+*Sign-in page with the rate-limited demo login. Sign-in uses Cognito's hosted login page (authorization code with PKCE).*
 
 ## Architecture
 
