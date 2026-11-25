@@ -95,6 +95,11 @@ data "aws_iam_policy_document" "query" {
     resources = [local.embedding_model]
   }
   statement {
+    sid       = "DailyQuota"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [var.usage_table_arn]
+  }
+  statement {
     # Claude in Amazon Bedrock (the bedrock-mantle Messages API endpoint).
     sid       = "ClaudeInference"
     actions   = ["bedrock-mantle:CreateInference"]

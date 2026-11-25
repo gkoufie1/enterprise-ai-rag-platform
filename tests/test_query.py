@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import FakeBedrockRuntime, FakeS3Vectors, load_handler
+from conftest import FakeBedrockRuntime, FakeS3Vectors, FakeUsageTable, load_handler
 
 HITS = [
     {
@@ -104,6 +104,7 @@ def test_input_guardrail_blocks_before_retrieval(monkeypatch):
         "blocked": True,
         "citations": [],
         "sources": [],
+        "remaining_questions_today": None,
     }
     assert claude.requests == []
 
@@ -125,3 +126,45 @@ def test_bad_requests_return_400(monkeypatch, body):
     module = make_query(monkeypatch)
     status, payload = call(module, body)
     assert status == 400 and "error" in payload
+
+
+def call_as(module, claims, question="remote work?"):
+    event = {"body": json.dumps({"question": question}), "requestContext": {"authorizer": {"jwt": {"claims": claims}}}}
+    response = module.lambda_handler(event, None)
+    return response["statusCode"], json.loads(response["body"])
+
+
+def with_quota(monkeypatch, module, demo_limit=2, user_limit=0):
+    module._clients["usage_table"] = FakeUsageTable()
+    monkeypatch.setattr(module, "USAGE_TABLE", "usage")
+    monkeypatch.setattr(module, "DEMO_DAILY_LIMIT", demo_limit)
+    monkeypatch.setattr(module, "USER_DAILY_LIMIT", user_limit)
+    return module
+
+
+def test_demo_account_is_capped_per_day(monkeypatch):
+    claude = FakeClaude()
+    module = with_quota(monkeypatch, make_query(monkeypatch, claude=claude))
+    demo = {"sub": "demo-user", "cognito:groups": "[demo]"}
+
+    assert call_as(module, demo)[1]["remaining_questions_today"] == 1
+    assert call_as(module, demo)[1]["remaining_questions_today"] == 0
+    status, body = call_as(module, demo)
+
+    assert status == 429 and "Daily limit of 2" in body["error"]
+    assert len(claude.requests) == 2  # the blocked question never reached the model
+
+
+def test_regular_users_are_unlimited_by_default(monkeypatch):
+    module = with_quota(monkeypatch, make_query(monkeypatch))
+    for _ in range(3):
+        status, body = call_as(module, {"sub": "employee", "cognito:groups": "[staff]"})
+        assert status == 200 and body["remaining_questions_today"] is None
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [("[demo]", {"demo"}), ("[demo staff]", {"demo", "staff"}), (["demo"], {"demo"}), ("", set())]
+)
+def test_group_claim_parsing(monkeypatch, raw, expected):
+    module = make_query(monkeypatch)
+    assert module.user_groups({"cognito:groups": raw}) == expected

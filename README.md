@@ -1,6 +1,6 @@
 # Enterprise AI RAG Platform on AWS
 
-A serverless retrieval-augmented generation (RAG) platform. Employees ask questions in plain English and get short answers grounded in internal documents, with citations to the exact passages. Everything is defined in Terraform and checked in CI.
+A serverless retrieval-augmented generation (RAG) platform. Employees sign in to a web chat, ask questions in plain English, and get short answers grounded in internal documents, with citations to the exact passages. Everything is defined in Terraform and checked in CI.
 
 ![CI](https://github.com/gkoufie1/enterprise-ai-rag-platform/actions/workflows/rag-platform.yml/badge.svg)
 
@@ -14,6 +14,7 @@ Policies, runbooks and onboarding guides are spread across wikis and drives. Peo
 - **Answers from the documents only.** Each question is embedded, the closest chunks are found with vector search, and Claude answers using only those chunks.
 - **Shows its sources.** Every answer comes with citations that point to the document, the chunk and the exact sentence used.
 - **Says "I don't know".** If nothing relevant is found, it says so instead of guessing.
+- **Has a web chat.** A static page on CloudFront with Cognito's hosted login, clickable citations, and a rate-limited demo account for visitors.
 - **Is secured and observable.** Cognito sign-in, Bedrock Guardrails on input and output, least-privilege IAM, alarms, a dashboard and tracing.
 
 ## Architecture
@@ -30,7 +31,8 @@ flowchart LR
     end
 
     subgraph Query
-        U2[Employee] -->|sign in| COG[Cognito user pool]
+        U2[Employee's browser] -->|load chat page| CF[CloudFront + private S3<br/>static site]
+        U2 -->|hosted login, code + PKCE| COG[Cognito user pool]
         U2 -->|POST /query + JWT| APIGW[API Gateway HTTP API<br/>JWT authorizer, throttling]
         APIGW --> QL[Query Lambda]
         QL -->|check question| GR[Bedrock Guardrails]
@@ -38,6 +40,7 @@ flowchart LR
         QL -->|top-k similarity search| SV
         QL -->|chunks as cited documents| CL[Claude on Amazon Bedrock]
         QL -->|check answer| GR
+        QL -->|daily quota| USE[(DynamoDB<br/>usage counters)]
     end
 
     subgraph Operations
@@ -49,7 +52,7 @@ flowchart LR
 
 ### How a question is answered
 
-1. API Gateway rejects the request unless it carries a valid Cognito JWT. It also throttles traffic, which caps spend.
+1. API Gateway rejects the request unless it carries a valid Cognito JWT. It also throttles traffic, which caps spend. Accounts in the `demo` group also have a daily question quota, counted in DynamoDB.
 2. The query Lambda checks the question with a **Bedrock Guardrail**. Prompt-injection attempts, harmful content and secrets are blocked before any model sees them.
 3. The question is embedded with **Titan Text Embeddings V2**. **S3 Vectors** returns the 5 closest chunks, and chunks further than a cosine-distance threshold are dropped.
 4. If nothing relevant remains, the API answers "not found" without calling the language model, so these requests cost almost nothing.
@@ -85,6 +88,7 @@ S3 sends an event to the ingestion Lambda, which:
 ## Repository layout
 
 ```
+frontend/              chat page: index.html, app.js, styles.css (no build step)
 app/
   rag_core/            shared code: chunking, embeddings, vector keys
   ingestion/handler.py S3 event -> chunks -> embeddings -> S3 Vectors
@@ -92,7 +96,7 @@ app/
 terraform/
   bootstrap/           state bucket + GitHub OIDC plan role (applied once)
   environments/dev/    wires the modules together
-  modules/             s3, vectors, dynamodb, auth, guardrail, iam, lambda, apigateway, monitoring
+  modules/             s3, vectors, dynamodb, auth, guardrail, iam, lambda, apigateway, monitoring, frontend
 tests/                 unit tests with fake AWS and Claude clients
 eval/                  15-question evaluation set and scoring script
 scripts/               build, upload, create user, get token, query, re-ingest
@@ -131,13 +135,22 @@ terraform apply tfplan
 
 Confirm the SNS subscription email so alarms reach you.
 
-### 3. Load documents and ask a question
+### 3. Load documents and open the web app
 
 ```bash
 bash scripts/upload_docs.sh                          # ingestion starts automatically
 
 export RAG_PASSWORD='Choose-a-Strong-Passw0rd!'
-bash scripts/create_user.sh you@example.com
+bash scripts/create_user.sh you@example.com          # your own account, no daily limit
+terraform -chdir=terraform/environments/dev output -raw frontend_url
+```
+
+Open the URL, choose **Sign in**, and use the account you just created. CloudFront can take a few minutes to start serving a new distribution.
+
+### 4. Or call the API from the terminal
+
+```bash
+
 export RAG_TOKEN="$(bash scripts/get_token.sh you@example.com)"
 
 bash scripts/query_api.sh "Can I use my personal laptop for customer data when working remotely?"
@@ -164,6 +177,25 @@ Example response:
 
 (Illustrative; your text, distances and token counts will differ.)
 
+## Web app and public demo account
+
+The chat page lives in `frontend/` as three static files with no build step. Terraform uploads them to a private S3 bucket served only through CloudFront, and generates `config.js` with the API URL and Cognito settings.
+
+- **Sign-in:** Cognito's hosted login page, using the authorization-code flow with PKCE. The browser never handles a client secret, and tokens are kept in `sessionStorage`.
+- **Answers:** each answer shows its cited passages under a "sources cited" toggle, plus a badge when the guardrail blocked something.
+- **Safe rendering:** API text is inserted with `textContent`, and CloudFront adds a strict Content-Security-Policy and other security headers.
+
+To let visitors (for example, recruiters) try it without giving out a personal account:
+
+```bash
+export RAG_PASSWORD='Demo-Passw0rd-2026!'
+bash scripts/create_user.sh demo@example.com demo    # joins the "demo" group
+```
+
+Then set `demo_login_hint` in `terraform.tfvars` (for example `"Email: demo@example.com   Password: Demo-Passw0rd-2026!"`) and apply again; the sign-in page shows it. Everyone using the demo login shares `demo_daily_limit` questions per day (default 30), so the worst-case cost is roughly 30 answers a day, about 50 cents. Regular accounts are unlimited unless you set `user_daily_limit`.
+
+To run the page locally, copy `frontend/config.example.js` to `frontend/config.js`, fill it in from `terraform output`, run `python -m http.server 3000` in `frontend/`, and open http://localhost:3000/.
+
 ## Evaluation
 
 `eval/questions.jsonl` holds 15 cases: 12 answerable questions with the document that should be cited and keywords the answer must contain, 2 questions the documents can't answer (the system should abstain), and 1 prompt-injection attempt (the guardrail should block it).
@@ -182,7 +214,7 @@ pip install -r requirements-dev.txt
 ruff check . && pytest
 ```
 
-The unit tests replace AWS and Claude with in-memory fakes. They cover chunking, idempotent re-ingestion, stale-vector cleanup, deletes, citation mapping, the distance filter, both guardrail checks, refusals and request validation.
+The unit tests replace AWS and Claude with in-memory fakes. They cover chunking, idempotent re-ingestion, stale-vector cleanup, deletes, citation mapping, the distance filter, both guardrail checks, refusals and request validation and the daily demo quota.
 
 On every push and pull request, GitHub Actions runs:
 
@@ -197,7 +229,8 @@ On every push and pull request, GitHub Actions runs:
 - **Least privilege:** one IAM role per function, scoped to its own log group, bucket, table, vector index, embedding model and guardrail.
 - **Data protection:** encryption at rest everywhere, a bucket policy that denies non-TLS requests, S3 Block Public Access, versioning, and DynamoDB point-in-time recovery.
 - **AI safety:** guardrails on input and output; the prompt treats documents as data; answers come only from retrieved context and abstain otherwise; a refusal fallback keeps users from getting an empty answer.
-- **Abuse and cost control:** API throttling (5 requests per second, burst 10), a 1,000-character question limit, and a cap on output tokens.
+- **Abuse and cost control:** API throttling (5 requests per second, burst 10), a daily question quota for demo accounts, a 1,000-character question limit, and a cap on output tokens.
+- **Web app:** private S3 origin behind CloudFront with origin access control, HTTPS only, Content-Security-Policy, HSTS and anti-framing headers. The demo login can't change its own password, because the web client's tokens don't carry the account-management scope.
 - **Auditability:** API access logs with the caller's identity, structured query logs, and X-Ray traces.
 
 ## Cost
@@ -210,6 +243,7 @@ With no traffic the platform costs close to nothing, because every component is 
 | Titan embeddings, S3 Vectors queries, guardrail checks, Lambda, API Gateway | well under 0.1 cent per question |
 | Questions with no relevant documents | no Claude call, so close to zero |
 | Storage (S3, S3 Vectors, DynamoDB) for the sample documents | cents per month |
+| CloudFront and the static site | free tier covers a demo (1 TB and 10 million requests per month) |
 
 Ways to reduce cost: switch `claude_model_id` to Sonnet 5.5, lower `top_k`, or tighten `max_distance`.
 
@@ -225,7 +259,7 @@ Ways to reduce cost: switch `claude_model_id` to Sonnet 5.5, lower `top_k`, or t
 - Only `.md` and `.txt` files are ingested; PDF and Word files would need a text-extraction step (for example Amazon Textract or a PDF library).
 - One knowledge base for everyone. Per-department access control could filter vector search on a metadata field that maps to Cognito groups.
 - Single-turn questions with no conversation memory.
-- No front end yet; a small web app using Cognito's hosted login (authorization code with PKCE) would be the next step.
+- The site uses the default `*.cloudfront.net` address; a custom domain needs an ACM certificate and a DNS record.
 - Answers are not streamed. Streaming would need Lambda response streaming or WebSockets instead of the HTTP API.
 
 ## Clean up

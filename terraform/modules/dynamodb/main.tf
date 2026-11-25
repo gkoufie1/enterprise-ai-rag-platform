@@ -19,3 +19,24 @@ resource "aws_dynamodb_table" "documents" {
     enabled = true
   }
 }
+
+# Daily question counters per user (sub#YYYY-MM-DD). Items expire automatically after two days.
+resource "aws_dynamodb_table" "usage" {
+  name         = "${var.name_prefix}-usage"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "usage_key"
+
+  attribute {
+    name = "usage_key"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}

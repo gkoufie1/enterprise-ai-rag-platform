@@ -10,11 +10,13 @@ import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
 
 import anthropic
 import boto3
 from anthropic import AnthropicBedrockMantle, BetaFallbackState, BetaRefusalFallbackMiddleware
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from rag_core.embeddings import embed
 
@@ -35,6 +37,9 @@ GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
 GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")
 METRICS_NAMESPACE = os.environ.get("METRICS_NAMESPACE", "EnterpriseRAG")
 FUNCTION_NAME = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "local")
+USAGE_TABLE = os.environ.get("USAGE_TABLE", "")
+DEMO_DAILY_LIMIT = int(os.environ.get("DEMO_DAILY_LIMIT", "30"))  # per demo account per day
+USER_DAILY_LIMIT = int(os.environ.get("USER_DAILY_LIMIT", "0"))  # 0 = unlimited
 MAX_QUESTION_CHARS = 1000
 
 SYSTEM_PROMPT = (
@@ -84,9 +89,13 @@ def lambda_handler(event, context):
     except ValueError as exc:
         return _response(400, {"error": str(exc)})
 
-    user = event.get("requestContext", {}).get("authorizer", {}).get("jwt", {}).get("claims", {}).get("sub", "unknown")
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("jwt", {}).get("claims", {})
+    user = claims.get("sub", "unknown")
     try:
+        remaining = consume_daily_quota(claims)
         result = answer_question(question)
+    except QuotaExceeded as exc:
+        return _response(429, {"error": str(exc)})
     except anthropic.RateLimitError:
         logger.exception("Claude rate limited")
         return _response(429, {"error": "The assistant is busy. Try again in a moment."})
@@ -111,7 +120,51 @@ def lambda_handler(event, context):
             }
         )
     )
-    return _response(200, {"question": question, **result})
+    return _response(200, {"question": question, **result, "remaining_questions_today": remaining})
+
+
+class QuotaExceeded(Exception):
+    pass
+
+
+def user_groups(claims: dict) -> set[str]:
+    """Cognito groups from JWT claims. HTTP API authorizers pass arrays as "[a b]" strings."""
+    raw = claims.get("cognito:groups", "")
+    if isinstance(raw, list):
+        return set(raw)
+    return {g for g in raw.strip("[]").replace(",", " ").split() if g}
+
+
+def consume_daily_quota(claims: dict) -> int | None:
+    """Count one question against the caller's daily limit.
+
+    Accounts in the `demo` group get a stricter limit, so a demo login shared publicly cannot
+    run up costs. Returns the questions left today, or None when the caller has no limit.
+    """
+    limit = DEMO_DAILY_LIMIT if "demo" in user_groups(claims) else USER_DAILY_LIMIT
+    if limit <= 0 or not USAGE_TABLE:
+        return None
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    try:
+        response = _usage_table().update_item(
+            Key={"usage_key": f"{claims.get('sub', 'unknown')}#{today}"},
+            UpdateExpression="ADD question_count :one SET expires_at = if_not_exists(expires_at, :ttl)",
+            ConditionExpression="attribute_not_exists(question_count) OR question_count < :limit",
+            ExpressionAttributeValues={":one": 1, ":limit": limit, ":ttl": int(time.time()) + 2 * 86400},
+            ReturnValues="UPDATED_NEW",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise QuotaExceeded(f"Daily limit of {limit} questions reached. It resets at 00:00 UTC.") from exc
+        raise
+    return limit - int(response["Attributes"]["question_count"])
+
+
+def _usage_table():
+    if "usage_table" not in _clients:
+        _clients["usage_table"] = boto3.resource("dynamodb", config=AWS_CONFIG).Table(USAGE_TABLE)
+    return _clients["usage_table"]
 
 
 def parse_question(event: dict) -> str:

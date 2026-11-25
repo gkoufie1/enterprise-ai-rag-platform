@@ -69,6 +69,23 @@ class FakeTable:
         self.items.pop(Key["document_key"], None)
 
 
+class FakeUsageTable:
+    """Mimics the conditional ADD the quota check uses."""
+
+    def __init__(self):
+        self.counts: dict[str, int] = {}
+
+    def update_item(self, Key, ExpressionAttributeValues, **_):
+        from botocore.exceptions import ClientError
+
+        key = Key["usage_key"]
+        current = self.counts.get(key)
+        if current is not None and current >= ExpressionAttributeValues[":limit"]:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
+        self.counts[key] = (current or 0) + 1
+        return {"Attributes": {"question_count": self.counts[key]}}
+
+
 class FakeS3:
     def __init__(self):
         self.objects: dict[str, tuple[bytes, str]] = {}

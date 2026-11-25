@@ -82,7 +82,7 @@ variable "enable_guardrail" {
 }
 
 variable "allowed_origins" {
-  description = "Browser origins allowed to call the API (CORS)."
+  description = "Extra browser origins allowed to call the API and sign in, for local development. The deployed site is always allowed."
   type        = list(string)
   default     = ["http://localhost:3000"]
 }
@@ -112,4 +112,23 @@ variable "force_destroy" {
   description = "Let terraform destroy delete buckets that still contain data. Keep false outside dev."
   type        = bool
   default     = false
+}
+
+# ---------------------------------------------------------------- front end and demo access
+variable "demo_daily_limit" {
+  description = "Questions per day for each account in the Cognito 'demo' group (everyone using a shared demo login shares it). 0 = unlimited."
+  type        = number
+  default     = 30
+}
+
+variable "user_daily_limit" {
+  description = "Questions per day for each other user. 0 = unlimited."
+  type        = number
+  default     = 0
+}
+
+variable "demo_login_hint" {
+  description = "Shown on the sign-in screen, e.g. \"Email: demo@example.com  Password: ...\". Empty hides it."
+  type        = string
+  default     = ""
 }

@@ -9,3 +9,8 @@ allowed_origins = ["http://localhost:3000"]
 
 # Dev convenience: let `terraform destroy` remove buckets that still hold data.
 force_destroy = true
+
+# Public demo login shown on the sign-in page. Create the account after deploying:
+#   RAG_PASSWORD='...' scripts/create_user.sh demo@example.com demo
+# demo_login_hint  = "Email: demo@example.com   Password: <the password you chose>"
+# demo_daily_limit = 30

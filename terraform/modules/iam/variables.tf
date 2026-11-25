@@ -43,3 +43,8 @@ variable "guardrail_arn" {
   type        = string
   default     = null
 }
+
+variable "usage_table_arn" {
+  description = "Table holding daily question counters."
+  type        = string
+}

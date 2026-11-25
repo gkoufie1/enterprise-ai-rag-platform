@@ -18,6 +18,8 @@ These notes supplement the diagram in the [README](../README.md) with the data m
 
 **DynamoDB `documents` table** (partition key `document_key`): `etag`, `chunk_count`, `size_bytes`, `status` (`INDEXED` or `EMPTY`), `embedding_model`, `ingested_at`.
 
+**DynamoDB `usage` table** (partition key `usage_key` = `<cognito sub>#<YYYY-MM-DD>`): `question_count`, plus `expires_at` for automatic TTL cleanup after two days. The query function increments it with one conditional `UpdateItem` (`ADD` only while the count is under the limit), so the check and the increment are atomic and concurrent requests can't exceed the quota.
+
 The registry is what makes the pipeline safe to re-run:
 
 - **Same ETag:** the file is skipped, with no embedding cost.
@@ -34,6 +36,7 @@ The registry is what makes the pipeline safe to re-run:
 | `s3vectors:PutVectors`, `DeleteVectors` | the index | none |
 | `s3vectors:QueryVectors`, `GetVectors` | none | the index (GetVectors is needed to return metadata) |
 | `bedrock:InvokeModel` | Titan V2 only | Titan V2 only |
+| `dynamodb:UpdateItem` | none | usage table (daily quota) |
 | `bedrock-mantle:CreateInference` | none | Claude in Amazon Bedrock projects in this account and region |
 | `bedrock:ApplyGuardrail` | none | the platform's guardrail |
 | `sqs:SendMessage` | ingestion DLQ | none |
@@ -51,6 +54,7 @@ Function names, the log groups and the DLQ name are computed up front in `enviro
 | Claude or Bedrock error | HTTP 502 | `api-5xx` alarm |
 | Slow answers | Lambda timeout is 29 s, under API Gateway's 30 s limit | `query-latency-p95` alarm above 20 s |
 | No relevant documents | "Not found" answer with no model call | `NoAnswer` metric on the dashboard; a rising rate means the documents have gaps |
+| Demo account reaches its daily limit | HTTP 429 with a message saying when the quota resets; the model is never called | API access logs |
 | Guardrail blocks input or output | The guardrail's message is returned with `blocked: true` | `GuardrailBlocked` metric |
 
 ## Tuning knobs
@@ -65,5 +69,16 @@ All of these are Terraform variables in `environments/dev/variables.tf`:
 | `max_distance` | 0.75 | Lower is stricter: fewer but more relevant chunks, more "not found" answers |
 | `chunk_words`, `chunk_overlap_words` | 250, 40 | Smaller chunks give more precise citations but less context per chunk |
 | `embedding_dimensions` | 1024 | 256 or 512 is cheaper to store; changing it re-creates the index |
+| `demo_daily_limit`, `user_daily_limit` | 30, 0 | Daily questions per account; 0 means unlimited |
 
 Measure every change with `eval/run_eval.py`.
+
+## Web front end
+
+```
+browser --GET--> CloudFront (CSP, HSTS, DENY framing) --OAC--> private S3 bucket
+browser --authorize (PKCE)--> Cognito hosted login --code--> browser --token--> Cognito
+browser --POST /query, Bearer ID token--> API Gateway JWT authorizer (accepts the API and web client IDs)
+```
+
+The Content-Security-Policy allows connections only to `*.execute-api.<region>.amazonaws.com` and `*.auth.<region>.amazoncognito.com`. Wildcards keep the CloudFront policy independent of the API and login URLs, which would otherwise create a dependency cycle (the API's CORS settings need the CloudFront address).

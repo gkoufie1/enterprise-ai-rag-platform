@@ -1,3 +1,8 @@
+output "frontend_url" {
+  description = "Open this in a browser to use the assistant."
+  value       = module.frontend.url
+}
+
 output "query_api_url" {
   value = "${module.apigateway.invoke_url}/query"
 }

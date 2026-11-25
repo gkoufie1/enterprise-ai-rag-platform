@@ -53,3 +53,52 @@ resource "aws_cognito_user_pool_client" "api" {
     refresh_token = "days"
   }
 }
+
+# ---------------------------------------------------------------- web front end
+# Hosted login page at https://<prefix>.auth.<region>.amazoncognito.com.
+# Version 1 is the classic hosted UI, which the Lite tier includes.
+resource "random_id" "domain_suffix" {
+  byte_length = 3
+}
+
+resource "aws_cognito_user_pool_domain" "this" {
+  domain                = "${var.name_prefix}-${random_id.domain_suffix.hex}"
+  user_pool_id          = aws_cognito_user_pool.this.id
+  managed_login_version = 1
+}
+
+# Public browser client: authorization code flow with PKCE, no client secret.
+# It enables no direct password flows, and its tokens do not carry the
+# aws.cognito.signin.user.admin scope, so a shared demo login cannot change its own password.
+resource "aws_cognito_user_pool_client" "web" {
+  name            = "${var.name_prefix}-web-client"
+  user_pool_id    = aws_cognito_user_pool.this.id
+  generate_secret = false
+
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["openid", "email"]
+  supported_identity_providers         = ["COGNITO"]
+  callback_urls                        = var.callback_urls
+  logout_urls                          = var.callback_urls
+  explicit_auth_flows                  = ["ALLOW_REFRESH_TOKEN_AUTH"]
+
+  prevent_user_existence_errors = "ENABLED"
+  enable_token_revocation       = true
+  id_token_validity             = 60
+  access_token_validity         = 60
+  refresh_token_validity        = 1
+
+  token_validity_units {
+    id_token      = "minutes"
+    access_token  = "minutes"
+    refresh_token = "days"
+  }
+}
+
+# Members share the DEMO_DAILY_LIMIT question quota enforced by the query function.
+resource "aws_cognito_user_group" "demo" {
+  name         = "demo"
+  user_pool_id = aws_cognito_user_pool.this.id
+  description  = "Public demo accounts with a small shared daily question limit."
+}

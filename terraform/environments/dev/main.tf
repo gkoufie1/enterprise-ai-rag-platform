@@ -34,6 +34,8 @@ module "auth" {
   source      = "../../modules/auth"
   name_prefix = local.name_prefix
   region      = var.aws_region
+  # The deployed site plus any local development origins (e.g. http://localhost:3000/).
+  callback_urls = concat([module.frontend.callback_url], [for o in var.allowed_origins : "${trimsuffix(o, "/")}/"])
 }
 
 module "guardrail" {
@@ -55,6 +57,7 @@ module "iam" {
   vector_index_arn        = module.vectors.index_arn
   embedding_model_id      = var.embedding_model_id
   guardrail_arn           = var.enable_guardrail ? module.guardrail[0].guardrail_arn : null
+  usage_table_arn         = module.dynamodb.usage_table_arn
 }
 
 module "lambda" {
@@ -83,6 +86,9 @@ module "lambda" {
     GUARDRAIL_ID         = var.enable_guardrail ? module.guardrail[0].guardrail_id : ""
     GUARDRAIL_VERSION    = var.enable_guardrail ? module.guardrail[0].guardrail_version : ""
     METRICS_NAMESPACE    = local.metrics_namespace
+    USAGE_TABLE          = module.dynamodb.usage_table_name
+    DEMO_DAILY_LIMIT     = tostring(var.demo_daily_limit)
+    USER_DAILY_LIMIT     = tostring(var.user_daily_limit)
   }
 
   ingestion_environment = {
@@ -103,8 +109,8 @@ module "apigateway" {
   query_function_name  = module.lambda.query_function_name
   query_invoke_arn     = module.lambda.query_invoke_arn
   jwt_issuer           = module.auth.issuer
-  jwt_audience         = [module.auth.client_id]
-  allowed_origins      = var.allowed_origins
+  jwt_audience         = [module.auth.client_id, module.auth.web_client_id]
+  allowed_origins      = concat([module.frontend.url], var.allowed_origins)
   throttle_rate_limit  = var.throttle_rate_limit
   throttle_burst_limit = var.throttle_burst_limit
   log_retention_days   = var.log_retention_days
@@ -120,4 +126,17 @@ module "monitoring" {
   api_id                  = module.apigateway.api_id
   metrics_namespace       = local.metrics_namespace
   alarm_email             = var.alarm_email
+}
+
+module "frontend" {
+  source             = "../../modules/frontend"
+  name_prefix        = local.name_prefix
+  region             = var.aws_region
+  source_dir         = "${path.root}/../../../frontend"
+  api_url            = "${module.apigateway.invoke_url}/query"
+  cognito_domain_url = module.auth.hosted_ui_url
+  client_id          = module.auth.web_client_id
+  demo_login_hint    = var.demo_login_hint
+  demo_daily_limit   = var.demo_daily_limit
+  force_destroy      = var.force_destroy
 }

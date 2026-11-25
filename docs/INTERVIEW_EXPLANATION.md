@@ -7,12 +7,13 @@ I built a serverless RAG platform on AWS that answers employee questions from in
 ## Two-minute walkthrough
 
 1. **Problem:** knowledge is scattered, people waste time searching, and a generic chatbot invents answers.
-2. **Ingestion:** S3 events trigger ingestion. A DynamoDB registry of ETags and chunk counts makes it idempotent and lets me delete stale vectors when a document shrinks or is removed. Failures are retried twice and then sent to a DLQ with an alarm.
-3. **Retrieval:** Titan V2 embeddings and S3 Vectors with cosine distance. I drop chunks above a distance threshold, and if nothing is left I return "not found" without calling the model. That prevents made-up answers and saves money.
-4. **Generation:** each chunk is passed to Claude as its own document with citations enabled, so every citation maps back to an exact document and chunk. The system prompt restricts answers to the documents and treats their text as data, which defends against prompt injection hidden in a document.
-5. **Safety and security:** guardrails on input and output, a Cognito JWT on the API, throttling, one IAM role per function, TLS-only encrypted buckets.
-6. **Operations:** custom metrics in Embedded Metric Format (tokens, latency, no-answer rate, guardrail blocks), alarms to SNS, X-Ray tracing.
-7. **Quality:** unit tests with fake AWS clients, plus an evaluation set that measures retrieval hit rate, citation accuracy, abstention and blocked attacks.
+2. **Front end:** a static chat page on CloudFront with a private S3 origin. Users sign in through Cognito's hosted login using the authorization-code flow with PKCE, and a demo account with a daily quota lets anyone try it safely.
+3. **Ingestion:** S3 events trigger ingestion. A DynamoDB registry of ETags and chunk counts makes it idempotent and lets me delete stale vectors when a document shrinks or is removed. Failures are retried twice and then sent to a DLQ with an alarm.
+4. **Retrieval:** Titan V2 embeddings and S3 Vectors with cosine distance. I drop chunks above a distance threshold, and if nothing is left I return "not found" without calling the model. That prevents made-up answers and saves money.
+5. **Generation:** each chunk is passed to Claude as its own document with citations enabled, so every citation maps back to an exact document and chunk. The system prompt restricts answers to the documents and treats their text as data, which defends against prompt injection hidden in a document.
+6. **Safety and security:** guardrails on input and output, a Cognito JWT on the API, throttling, one IAM role per function, TLS-only encrypted buckets.
+7. **Operations:** custom metrics in Embedded Metric Format (tokens, latency, no-answer rate, guardrail blocks), alarms to SNS, X-Ray tracing.
+8. **Quality:** unit tests with fake AWS clients, plus an evaluation set that measures retrieval hit rate, citation accuracy, abstention and blocked attacks.
 
 ## Questions you are likely to get
 
@@ -42,8 +43,14 @@ The S3 event re-triggers ingestion. The new ETag differs from the registry, so t
 - **Ingestion throughput:** batch embeddings and use SQS between S3 and Lambda to control concurrency.
 - **Answer latency:** add response streaming for long answers.
 
+**How do you stop a public demo from running up a bill?**
+Three limits stack. API Gateway throttles to 5 requests per second. Demo accounts have a daily question quota, enforced with an atomic conditional update in DynamoDB. Questions with no relevant documents never reach the model. Worst case, the demo costs about 50 cents a day.
+
+**Why PKCE and not a simple login form?**
+The browser is a public client and can't keep a secret. The authorization-code flow with PKCE is the current standard for single-page apps: the password is only ever typed into Cognito's own page, and an intercepted code is useless without the verifier that stays in the browser.
+
 **What does it cost?**
 Close to zero when idle because everything is serverless. A question costs about a cent or two with Opus 5.5, and much less with a smaller model. Questions with no relevant documents never call the model.
 
 **What would you do next?**
-PDF ingestion with Textract, a small web front end with Cognito's hosted login, per-department access control, conversation memory, and running the evaluation in CI against a staging environment.
+PDF ingestion with Textract, a custom domain for the web app, per-department access control, conversation memory, and running the evaluation in CI against a staging environment.
