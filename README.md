@@ -17,6 +17,12 @@ Policies, runbooks and onboarding guides are spread across wikis and drives. Peo
 - **Has a web chat.** A static page on CloudFront with Cognito's hosted login, clickable citations, and a rate-limited demo account for visitors.
 - **Is secured and observable.** Cognito sign-in, Bedrock Guardrails on input and output, least-privilege IAM, alarms, a dashboard and tracing.
 
+## Live demo
+
+**Try it:** https://d1oaspqgya82kd.cloudfront.net. The demo login is shown on the sign-in page and allows 30 questions a day.
+
+<img src="docs/screenshots/01-sign-in.png" alt="Sign-in page of the Knowledge Assistant with the demo login" width="820">
+
 ## Architecture
 
 ```mermaid
@@ -68,6 +74,26 @@ S3 sends an event to the ingestion Lambda, which:
 3. Writes the vectors with deterministic keys, so a re-upload overwrites the old vectors in place.
 4. Deletes the vectors for chunk numbers that no longer exist when a document gets shorter. Deleting a file removes all of its vectors.
 5. Retries failures twice, then sends them to a dead-letter queue, which raises an alarm.
+
+## Screenshots
+
+### Monitoring and CI
+
+<img src="docs/screenshots/03-cloudwatch-dashboard.png" alt="CloudWatch dashboard: API requests, latency, Claude tokens, no-answer and guardrail metrics, Lambda errors, ingestion and DLQ depth" width="820">
+
+*CloudWatch dashboard: API traffic and errors, p50/p95 latency, Claude token usage, answer-quality signals (no answer, guardrail blocks), Lambda errors and ingestion with DLQ depth.*
+
+<img src="docs/screenshots/04-github-actions-ci.png" alt="GitHub Actions run with lint and tests, Terraform validate, Checkov scan and Terraform plan all passing" width="820">
+
+*Every push runs lint and unit tests, Terraform validation and a Checkov scan, then a live `terraform plan` through a read-only GitHub OIDC role.*
+
+### AWS resources
+
+| | |
+|---|---|
+| <img src="docs/screenshots/05-bedrock-guardrail.png" alt="Bedrock guardrail ready" width="400"><br>*Bedrock Guardrail screening questions and answers* | <img src="docs/screenshots/07-dynamodb-document-registry.png" alt="DynamoDB document registry with five indexed documents and chunk counts" width="400"><br>*Document registry: chunk count and embedding model per document* |
+| <img src="docs/screenshots/06-api-gateway-route.png" alt="API Gateway POST /query route" width="400"><br>*HTTP API with the single `POST /query` route (JWT-protected)* | <img src="docs/screenshots/08-lambda-query-function.png" alt="Query Lambda triggered by API Gateway" width="400"><br>*Query Lambda behind API Gateway* |
+| <img src="docs/screenshots/09-cognito-users.png" alt="Cognito user pool with owner and demo users" width="400"><br>*Cognito users: an owner account and the rate-limited demo account* | |
 
 ## Tech stack
 
