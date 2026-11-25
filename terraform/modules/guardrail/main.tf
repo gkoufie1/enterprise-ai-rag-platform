@@ -1,11 +1,13 @@
 locals {
   # PROMPT_ATTACK applies to user input only, so its output strength must be NONE.
+  # MISCONDUCT is MEDIUM: at HIGH it also blocks low-confidence matches, and ordinary policy
+  # questions ("Can I use my personal laptop for customer data?") were blocked as misconduct.
   content_filters = {
     HATE          = { input = "HIGH", output = "HIGH" }
     INSULTS       = { input = "HIGH", output = "HIGH" }
     SEXUAL        = { input = "HIGH", output = "HIGH" }
     VIOLENCE      = { input = "HIGH", output = "HIGH" }
-    MISCONDUCT    = { input = "HIGH", output = "HIGH" }
+    MISCONDUCT    = { input = "MEDIUM", output = "MEDIUM" }
     PROMPT_ATTACK = { input = "HIGH", output = "NONE" }
   }
 
@@ -49,7 +51,13 @@ resource "aws_bedrock_guardrail" "this" {
   }
 }
 
+# A version is an immutable snapshot, and the Lambda uses the version number. Publish a new
+# version whenever the guardrail's policy changes, otherwise the change never takes effect.
 resource "aws_bedrock_guardrail_version" "this" {
   guardrail_arn = aws_bedrock_guardrail.this.guardrail_arn
   description   = "Managed by Terraform"
+
+  lifecycle {
+    replace_triggered_by = [aws_bedrock_guardrail.this]
+  }
 }

@@ -63,8 +63,8 @@ flowchart LR
 
 S3 sends an event to the ingestion Lambda, which:
 
-1. Compares the file's ETag with the DynamoDB registry and skips files that haven't changed.
-2. Splits the text into 250-word chunks with a 40-word overlap and embeds each chunk.
+1. Compares the file's ETag and the current chunking and embedding settings with the DynamoDB registry, and skips files that haven't changed.
+2. Splits Markdown at its headings so each section becomes its own chunk, labeled with the document and section title. Long sections are split further into 150-word windows with a 30-word overlap. Then it embeds each chunk.
 3. Writes the vectors with deterministic keys, so a re-upload overwrites the old vectors in place.
 4. Deletes the vectors for chunk numbers that no longer exist when a document gets shorter. Deleting a file removes all of its vectors.
 5. Retries failures twice, then sends them to a dead-letter queue, which raises an alarm.
@@ -218,6 +218,17 @@ python eval/run_eval.py
 ```
 
 It reports retrieval hit rate, citation accuracy, keyword accuracy, correct abstentions and blocked attacks, then writes `eval/results.json`. Re-run it after changing the chunk size, `top_k`, the distance threshold, the model or the prompt, and compare.
+
+### Results on the deployed system (Claude Haiku 4.5)
+
+| Version | Passed | Retrieval | Citation | Keywords | Abstained correctly | Injection blocked |
+|---|---|---|---|---|---|---|
+| Fixed 250-word chunks, cutoff 0.75 | 12 / 15 | 9 / 12 | 9 / 12 | 9 / 12 | 2 / 2 | 1 / 1 |
+| **Section-aware chunks, cutoff 0.70** | **15 / 15** | **12 / 12** | **12 / 12** | **12 / 12** | **2 / 2** | **1 / 1** |
+
+The first run failed three questions that never reached the model. Each short document had become a single chunk, so a narrow question ("How long do we keep audit logs?") was a weak match for a document covering five topics, and the search ranked the wrong document first. Splitting at Markdown headings gave each topic its own embedding: the cosine distance of the right section fell from 0.76–0.86 to 0.42–0.59, while unanswerable questions stayed at 0.79 or more. That gap is why the cutoff moved to 0.70. Answers took about 1.5 seconds; abstentions and blocks about 0.5 seconds.
+
+The guardrail also needed tuning on the live system: at the strictest setting its misconduct filter blocked "Can I use my personal laptop to look at customer data?", a normal policy question, so that filter now runs at medium strength.
 
 ## Testing and CI
 

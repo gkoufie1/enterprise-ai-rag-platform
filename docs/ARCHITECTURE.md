@@ -68,8 +68,8 @@ All of these are Terraform variables in `environments/dev/variables.tf`:
 | `claude_model_id` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Quality versus cost |
 | `claude_effort` | `low` | `mantle` only: higher effort means more reasoning and more latency |
 | `top_k` | 5 | Chunks sent to the model |
-| `max_distance` | 0.75 | Lower is stricter: fewer but more relevant chunks, more "not found" answers |
-| `chunk_words`, `chunk_overlap_words` | 250, 40 | Smaller chunks give more precise citations but less context per chunk |
+| `max_distance` | 0.7 | Lower is stricter: fewer but more relevant chunks, more "not found" answers |
+| `chunk_words`, `chunk_overlap_words` | 150, 30 | Upper bound per chunk; Markdown is split at headings first. Smaller chunks give more precise retrieval but less context per chunk |
 | `embedding_dimensions` | 1024 | 256 or 512 is cheaper to store; changing it re-creates the index |
 | `demo_daily_limit`, `user_daily_limit` | 30, 0 | Daily questions per account; 0 means unlimited |
 

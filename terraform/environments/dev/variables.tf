@@ -79,17 +79,18 @@ variable "top_k" {
 variable "max_distance" {
   description = "Cosine distance above which a retrieved chunk is treated as irrelevant."
   type        = number
-  default     = 0.75
+  default     = 0.7
 }
 
 variable "chunk_words" {
-  type    = number
-  default = 250
+  description = "Maximum words per chunk. Markdown is split at headings first; longer sections are windowed."
+  type        = number
+  default     = 150
 }
 
 variable "chunk_overlap_words" {
   type    = number
-  default = 40
+  default = 30
 }
 
 # ---------------------------------------------------------------- security and operations

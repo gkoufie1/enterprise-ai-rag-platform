@@ -1,7 +1,8 @@
 """Ingestion Lambda: S3 document -> chunks -> Titan embeddings -> S3 Vectors.
 
 Triggered by S3 ObjectCreated / ObjectRemoved events. Can also be invoked directly with
-{"key": "...", "bucket": "...(optional)", "action": "ingest" | "delete"} to re-ingest by hand.
+{"key": "...", "bucket": "...(optional)", "action": "ingest" | "delete", "force": true|false}
+to re-ingest by hand.
 
 A DynamoDB registry records each document's ETag and chunk count, which makes ingestion
 idempotent (unchanged files are skipped) and lets us delete stale vectors when a document
@@ -16,7 +17,7 @@ from datetime import UTC, datetime
 import boto3
 from botocore.config import Config
 
-from rag_core.chunking import chunk_text
+from rag_core.chunking import CHUNKER_VERSION, chunk_document
 from rag_core.embeddings import embed
 from rag_core.keys import vector_key
 
@@ -34,8 +35,12 @@ VECTOR_BUCKET = os.environ.get("VECTOR_BUCKET", "")
 VECTOR_INDEX = os.environ.get("VECTOR_INDEX", "")
 EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 EMBEDDING_DIMENSIONS = int(os.environ.get("EMBEDDING_DIMENSIONS", "1024"))
-CHUNK_WORDS = int(os.environ.get("CHUNK_WORDS", "250"))
-CHUNK_OVERLAP_WORDS = int(os.environ.get("CHUNK_OVERLAP_WORDS", "40"))
+CHUNK_WORDS = int(os.environ.get("CHUNK_WORDS", "150"))
+CHUNK_OVERLAP_WORDS = int(os.environ.get("CHUNK_OVERLAP_WORDS", "30"))
+
+# Everything that shapes the vectors. A document is re-indexed when its content (ETag) or any of
+# these change, so tuning chunking or switching embedding models re-indexes on the next upload.
+INDEX_CONFIG = f"{CHUNKER_VERSION}|{CHUNK_WORDS}/{CHUNK_OVERLAP_WORDS}|{EMBEDDING_MODEL_ID}|{EMBEDDING_DIMENSIONS}"
 
 # Explicit timeouts so a slow dependency fails fast instead of consuming the Lambda timeout.
 AWS_CONFIG = Config(connect_timeout=5, read_timeout=20, retries={"max_attempts": 3, "mode": "standard"})
@@ -81,16 +86,23 @@ def parse_event(event: dict) -> list[dict]:
     action = event.get("action", "ingest")
     if action not in ("ingest", "delete"):
         raise ValueError("action must be 'ingest' or 'delete'")
-    return [{"bucket": event.get("bucket", DOCUMENT_BUCKET), "key": event["key"], "action": action}]
+    return [
+        {
+            "bucket": event.get("bucket", DOCUMENT_BUCKET),
+            "key": event["key"],
+            "action": action,
+            "force": bool(event.get("force", False)),
+        }
+    ]
 
 
 def _run(job: dict) -> dict:
     if job["action"] == "delete":
         return delete_document(job["key"])
-    return ingest_document(job["bucket"], job["key"])
+    return ingest_document(job["bucket"], job["key"], force=job.get("force", False))
 
 
-def ingest_document(bucket: str, key: str) -> dict:
+def ingest_document(bucket: str, key: str, force: bool = False) -> dict:
     if not key.lower().endswith(SUPPORTED_SUFFIXES):
         logger.info("skipping unsupported file type: %s", key)
         return {"key": key, "status": "skipped_unsupported_type"}
@@ -103,11 +115,12 @@ def ingest_document(bucket: str, key: str) -> dict:
         return {"key": key, "status": "skipped_too_large"}
 
     existing = _table().get_item(Key={"document_key": key}).get("Item") or {}
-    if existing.get("etag") == etag and existing.get("status") == "INDEXED":
+    up_to_date = existing.get("etag") == etag and existing.get("index_config") == INDEX_CONFIG
+    if up_to_date and existing.get("status") == "INDEXED" and not force:
         return {"key": key, "status": "unchanged"}
 
     text = obj["Body"].read().decode("utf-8", errors="replace")
-    chunks = chunk_text(text, CHUNK_WORDS, CHUNK_OVERLAP_WORDS)
+    chunks = chunk_document(text, CHUNK_WORDS, CHUNK_OVERLAP_WORDS)
 
     vectors = [
         {
@@ -137,6 +150,7 @@ def ingest_document(bucket: str, key: str) -> dict:
             "size_bytes": size,
             "status": "INDEXED" if chunks else "EMPTY",
             "embedding_model": EMBEDDING_MODEL_ID,
+            "index_config": INDEX_CONFIG,
             "ingested_at": datetime.now(UTC).isoformat(),
         }
     )

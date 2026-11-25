@@ -33,7 +33,7 @@ FALLBACK_MODEL_ID = os.environ.get("FALLBACK_MODEL_ID", "")  # mantle endpoint o
 CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT", "low")
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "4096"))
 TOP_K = int(os.environ.get("TOP_K", "5"))
-MAX_DISTANCE = float(os.environ.get("MAX_DISTANCE", "0.75"))  # cosine distance; lower = closer
+MAX_DISTANCE = float(os.environ.get("MAX_DISTANCE", "0.7"))  # cosine distance; lower = closer
 GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
 GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")
 METRICS_NAMESPACE = os.environ.get("METRICS_NAMESPACE", "EnterpriseRAG")

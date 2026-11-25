@@ -86,7 +86,12 @@ jobs:
           -backend-config="use_lockfile=true"
       - name: Terraform plan
         working-directory: terraform/environments/dev
+        env:
+          # Contents of the deployed terraform.tfvars, stored as the TFVARS_DEV repository variable,
+          # so the plan compares against the same settings. Do not put secrets in it.
+          TFVARS: ${{ vars.TFVARS_DEV }}
         run: |
+          if [ -n "$TFVARS" ]; then printf '%s\n' "$TFVARS" > terraform.tfvars; fi
           terraform plan -input=false -lock=false -no-color -var="aws_region=${AWS_REGION}" | tee plan.txt
           {
             echo '### Terraform plan (dev)'

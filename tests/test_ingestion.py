@@ -69,3 +69,17 @@ def test_unsupported_file_type_is_skipped(ingestion, fakes):
 def test_manual_invocation_requires_key(ingestion):
     with pytest.raises(ValueError):
         ingestion.lambda_handler({}, None)
+
+
+def test_changed_index_config_reindexes_unchanged_files(ingestion, fakes, monkeypatch):
+    fakes["s3"].put("a.md", words(5))
+    ingestion.lambda_handler(s3_event("a.md"), None)
+    monkeypatch.setattr(ingestion, "INDEX_CONFIG", "new-chunker")
+    assert ingestion.lambda_handler(s3_event("a.md"), None)["results"][0]["status"] == "indexed"
+
+
+def test_manual_force_reindexes(ingestion, fakes):
+    fakes["s3"].put("a.md", words(5))
+    ingestion.lambda_handler(s3_event("a.md"), None)
+    result = ingestion.lambda_handler({"bucket": "docs", "key": "a.md", "force": True}, None)
+    assert result["results"][0]["status"] == "indexed"
