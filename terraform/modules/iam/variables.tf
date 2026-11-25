@@ -44,6 +44,16 @@ variable "guardrail_arn" {
   default     = null
 }
 
+variable "claude_endpoint" {
+  description = "runtime or mantle; decides which Bedrock permission the query role gets."
+  type        = string
+}
+
+variable "claude_model_id" {
+  description = "For the runtime endpoint: the inference profile ID (e.g. us.anthropic.claude-haiku-4-5-20251001-v1:0)."
+  type        = string
+}
+
 variable "usage_table_arn" {
   description = "Table holding daily question counters."
   type        = string

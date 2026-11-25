@@ -27,8 +27,9 @@ VECTOR_BUCKET = os.environ.get("VECTOR_BUCKET", "")
 VECTOR_INDEX = os.environ.get("VECTOR_INDEX", "")
 EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 EMBEDDING_DIMENSIONS = int(os.environ.get("EMBEDDING_DIMENSIONS", "1024"))
-CLAUDE_MODEL_ID = os.environ.get("CLAUDE_MODEL_ID", "anthropic.claude-opus-5-5")
-FALLBACK_MODEL_ID = os.environ.get("FALLBACK_MODEL_ID", "anthropic.claude-opus-4-8")
+CLAUDE_ENDPOINT = os.environ.get("CLAUDE_ENDPOINT", "runtime")  # "runtime" or "mantle", see call_claude
+CLAUDE_MODEL_ID = os.environ.get("CLAUDE_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+FALLBACK_MODEL_ID = os.environ.get("FALLBACK_MODEL_ID", "")  # mantle endpoint only
 CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT", "low")
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "4096"))
 TOP_K = int(os.environ.get("TOP_K", "5"))
@@ -101,6 +102,12 @@ def lambda_handler(event, context):
         return _response(429, {"error": "The assistant is busy. Try again in a moment."})
     except anthropic.APIError:
         logger.exception("Claude request failed")
+        return _response(502, {"error": "The answer service is temporarily unavailable."})
+    except ClientError as exc:
+        # AWS service errors (Bedrock runtime, S3 Vectors, guardrail, DynamoDB).
+        logger.exception("AWS request failed")
+        if exc.response.get("Error", {}).get("Code") in ("ThrottlingException", "TooManyRequestsException"):
+            return _response(429, {"error": "The assistant is busy. Try again in a moment."})
         return _response(502, {"error": "The answer service is temporarily unavailable."})
     except Exception:
         logger.exception("query failed")
@@ -228,15 +235,7 @@ def generate_answer(question: str, hits: list[dict]) -> dict:
     ]
     content.append({"type": "text", "text": question})
 
-    # Each API call is a one-turn conversation, so each gets its own fallback state.
-    with BetaFallbackState():
-        message = _claude().beta.messages.create(
-            model=CLAUDE_MODEL_ID,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            system=SYSTEM_PROMPT,
-            output_config={"effort": CLAUDE_EFFORT},
-            messages=[{"role": "user", "content": content}],
-        )
+    message = call_claude(content)
 
     sources = [
         {
@@ -246,37 +245,131 @@ def generate_answer(question: str, hits: list[dict]) -> dict:
         }
         for hit in hits
     ]
-    usage = {"input_tokens": message.usage.input_tokens, "output_tokens": message.usage.output_tokens}
+    usage = message["usage"]
 
-    if message.stop_reason == "refusal":
-        return {"answer": REFUSAL_ANSWER, "citations": [], "sources": sources, "model": message.model, "usage": usage}
-    if message.stop_reason == "max_tokens":
+    if message["stop_reason"] == "refusal":
+        return {
+            "answer": REFUSAL_ANSWER,
+            "citations": [],
+            "sources": sources,
+            "model": message["model"],
+            "usage": usage,
+        }
+    if message["stop_reason"] == "max_tokens":
         logger.warning("answer hit max_tokens (%d); consider raising MAX_OUTPUT_TOKENS", MAX_OUTPUT_TOKENS)
 
     parts, citations, seen = [], [], set()
-    for block in message.content:
-        if block.type != "text":
-            continue  # thinking / fallback seam blocks are not part of the answer
-        parts.append(block.text)
-        for cite in getattr(block, "citations", None) or []:
-            index = getattr(cite, "document_index", None)
+    for block in message["text_blocks"]:
+        parts.append(block["text"])
+        for cite in block["citations"]:
+            index = cite.get("document_index")
             if index is None or index >= len(hits):
                 continue
-            marker = (index, cite.cited_text)
+            marker = (index, cite["cited_text"])
             if marker in seen:
                 continue
             seen.add(marker)
             citations.append(
-                {**{k: sources[index][k] for k in ("document_key", "chunk_index")}, "cited_text": cite.cited_text}
+                {**{k: sources[index][k] for k in ("document_key", "chunk_index")}, "cited_text": cite["cited_text"]}
             )
 
     return {
         "answer": "".join(parts).strip(),
         "citations": citations,
         "sources": sources,
-        "model": message.model,
+        "model": message["model"],
         "usage": usage,
     }
+
+
+def call_claude(content: list[dict]) -> dict:
+    """Ask Claude through the configured Bedrock endpoint and return a normalized reply.
+
+    CLAUDE_ENDPOINT=mantle   Claude in Amazon Bedrock (Messages API, Anthropic SDK). Needed for
+                             the newest models such as Opus 5.5; supports `effort` and the
+                             client-side refusal fallback.
+    CLAUDE_ENDPOINT=runtime  Classic bedrock-runtime InvokeModel with a cross-region inference
+                             profile (e.g. Claude Haiku 4.5). Available to more accounts.
+
+    Returns {"stop_reason", "model", "usage", "text_blocks": [{"text", "citations": [...]}]}.
+    """
+    if CLAUDE_ENDPOINT == "runtime":
+        return _call_runtime(content)
+    return _call_mantle(content)
+
+
+def _call_mantle(content: list[dict]) -> dict:
+    # Each API call is a one-turn conversation, so each gets its own fallback state.
+    with BetaFallbackState():
+        message = _claude().beta.messages.create(
+            model=CLAUDE_MODEL_ID,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            system=SYSTEM_PROMPT,
+            output_config={"effort": CLAUDE_EFFORT},
+            messages=[{"role": "user", "content": content}],
+        )
+    return {
+        "stop_reason": message.stop_reason,
+        "model": message.model,
+        "usage": {"input_tokens": message.usage.input_tokens, "output_tokens": message.usage.output_tokens},
+        # thinking and fallback seam blocks are not part of the answer
+        "text_blocks": [
+            {
+                "text": block.text,
+                "citations": [
+                    {"document_index": getattr(c, "document_index", None), "cited_text": c.cited_text}
+                    for c in (getattr(block, "citations", None) or [])
+                ],
+            }
+            for block in message.content
+            if block.type == "text"
+        ],
+    }
+
+
+def _call_runtime(content: list[dict]) -> dict:
+    response = _llm_runtime().invoke_model(
+        modelId=CLAUDE_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "system": SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": content}],
+            }
+        ),
+    )
+    reply = json.loads(response["body"].read())
+    usage = reply.get("usage", {})
+    return {
+        "stop_reason": reply.get("stop_reason"),
+        "model": reply.get("model") or CLAUDE_MODEL_ID,
+        "usage": {"input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0)},
+        "text_blocks": [
+            {
+                "text": block["text"],
+                "citations": [
+                    {"document_index": c.get("document_index"), "cited_text": c.get("cited_text", "")}
+                    for c in block.get("citations") or []
+                ],
+            }
+            for block in reply.get("content", [])
+            if block.get("type") == "text"
+        ],
+    }
+
+
+def _llm_runtime():
+    # Separate client: one attempt with a longer read timeout, so a slow answer is not
+    # retried past API Gateway's 30-second limit.
+    if "llm_runtime" not in _clients:
+        _clients["llm_runtime"] = boto3.client(
+            "bedrock-runtime",
+            config=Config(connect_timeout=5, read_timeout=25, retries={"max_attempts": 1, "mode": "standard"}),
+        )
+    return _clients["llm_runtime"]
 
 
 def apply_guardrail(text: str, source: str) -> str | None:

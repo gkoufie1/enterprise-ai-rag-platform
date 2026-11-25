@@ -1,3 +1,4 @@
+import io
 import json
 from types import SimpleNamespace
 
@@ -58,6 +59,7 @@ def make_query(monkeypatch, *, hits=HITS, claude=None, guardrail_block=None, gua
         }
     )
     monkeypatch.setattr(module, "GUARDRAIL_ID", "gr-123" if guardrail else "")
+    monkeypatch.setattr(module, "CLAUDE_ENDPOINT", "mantle")
     return module
 
 
@@ -168,3 +170,62 @@ def test_regular_users_are_unlimited_by_default(monkeypatch):
 def test_group_claim_parsing(monkeypatch, raw, expected):
     module = make_query(monkeypatch)
     assert module.user_groups({"cognito:groups": raw}) == expected
+
+
+class FakeClaudeRuntime:
+    """bedrock-runtime InvokeModel with an Anthropic Messages body (the classic endpoint)."""
+
+    def __init__(self, error_code=None):
+        self.bodies = []
+        self.error_code = error_code
+
+    def invoke_model(self, modelId, body, **_):
+        if self.error_code:
+            from botocore.exceptions import ClientError
+
+            raise ClientError({"Error": {"Code": self.error_code, "Message": "x"}}, "InvokeModel")
+        self.bodies.append((modelId, json.loads(body)))
+        reply = {
+            "model": "claude-haiku-4-5-20251001",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 639, "output_tokens": 32},
+            "content": [
+                {
+                    "type": "text",
+                    "text": "No, personal devices may not be used.",
+                    "citations": [
+                        {"type": "char_location", "document_index": 0, "cited_text": "Remote work needs VPN and MFA."}
+                    ],
+                }
+            ],
+        }
+        return {"body": io.BytesIO(json.dumps(reply).encode())}
+
+
+def make_runtime_query(monkeypatch, runtime):
+    module = make_query(monkeypatch, guardrail=False)
+    module._clients["llm_runtime"] = runtime
+    monkeypatch.setattr(module, "CLAUDE_ENDPOINT", "runtime")
+    return module
+
+
+def test_runtime_endpoint_sends_messages_body_and_maps_citations(monkeypatch):
+    runtime = FakeClaudeRuntime()
+    module = make_runtime_query(monkeypatch, runtime)
+    status, body = call(module, {"question": "Personal laptop?"})
+
+    assert status == 200
+    assert body["answer"] == "No, personal devices may not be used."
+    assert body["citations"][0]["document_key"] == "remote-work-policy.md"
+    assert body["usage"] == {"input_tokens": 639, "output_tokens": 32}
+    model_id, request = runtime.bodies[0]
+    assert model_id == module.CLAUDE_MODEL_ID
+    assert request["anthropic_version"] == "bedrock-2023-05-31"
+    assert "output_config" not in request  # effort is not sent to the classic endpoint
+    assert sum(b["type"] == "document" for b in request["messages"][0]["content"]) == 2
+
+
+@pytest.mark.parametrize("code,status", [("ThrottlingException", 429), ("AccessDeniedException", 502)])
+def test_runtime_errors_map_to_friendly_statuses(monkeypatch, code, status):
+    module = make_runtime_query(monkeypatch, FakeClaudeRuntime(error_code=code))
+    assert call(module, {"question": "Personal laptop?"})[0] == status

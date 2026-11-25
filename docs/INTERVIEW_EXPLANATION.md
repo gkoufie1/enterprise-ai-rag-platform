@@ -49,8 +49,11 @@ Three limits stack. API Gateway throttles to 5 requests per second. Demo account
 **Why PKCE and not a simple login form?**
 The browser is a public client and can't keep a secret. The authorization-code flow with PKCE is the current standard for single-page apps: the password is only ever typed into Cognito's own page, and an intercepted code is useless without the verifier that stays in the browser.
 
+**Why Haiku and not the biggest model?**
+My AWS account wasn't yet eligible for Opus 5.5, which AWS enables per account. Instead of waiting, I made the Bedrock endpoint and model a configuration setting, with matching IAM permissions for each, and ran on Haiku 4.5. For short answers grounded in retrieved documents, a small model performs well, and it's faster and about five times cheaper. Switching to Opus is a one-line change.
+
 **What does it cost?**
-Close to zero when idle because everything is serverless. A question costs about a cent or two with Opus 5.5, and much less with a smaller model. Questions with no relevant documents never call the model.
+Close to zero when idle because everything is serverless. A question costs about a third of a cent with Haiku 4.5, or a cent or two with Opus 5.5. Questions with no relevant documents never call the model.
 
 **What would you do next?**
 PDF ingestion with Textract, a custom domain for the web app, per-department access control, conversation memory, and running the evaluation in CI against a staging environment.

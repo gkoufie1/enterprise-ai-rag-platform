@@ -37,7 +37,8 @@ The registry is what makes the pipeline safe to re-run:
 | `s3vectors:QueryVectors`, `GetVectors` | none | the index (GetVectors is needed to return metadata) |
 | `bedrock:InvokeModel` | Titan V2 only | Titan V2 only |
 | `dynamodb:UpdateItem` | none | usage table (daily quota) |
-| `bedrock-mantle:CreateInference` | none | Claude in Amazon Bedrock projects in this account and region |
+| `bedrock:InvokeModel` (Claude) | none | `runtime` endpoint: the inference profile and its foundation model in every region the profile routes to |
+| `bedrock-mantle:CreateInference` | none | `mantle` endpoint only: Claude in Amazon Bedrock projects in this account and region |
 | `bedrock:ApplyGuardrail` | none | the platform's guardrail |
 | `sqs:SendMessage` | ingestion DLQ | none |
 | X-Ray write | yes | yes |
@@ -49,7 +50,7 @@ Function names, the log groups and the DLQ name are computed up front in `enviro
 | Failure | Behaviour | How you find out |
 |---|---|---|
 | Embedding or vector write fails during ingestion | Lambda retries the S3 event twice, then sends it to the SQS DLQ | `ingestion-errors` and `ingestion-dlq-not-empty` alarms; re-run with `scripts/reingest.sh` |
-| Claude refuses a request | Retried once on the fallback model (Opus 4.8) by the SDK middleware; if that also refuses, the user gets a polite refusal | `model` field in the response, logs |
+| Claude refuses a request | `mantle` endpoint: retried once on `fallback_model_id` by the SDK middleware. Either endpoint: the user gets a polite refusal | `model` field in the response, logs |
 | Claude rate-limited | HTTP 429 with a retry message | `query-errors` alarm does not fire (handled); visible in access logs |
 | Claude or Bedrock error | HTTP 502 | `api-5xx` alarm |
 | Slow answers | Lambda timeout is 29 s, under API Gateway's 30 s limit | `query-latency-p95` alarm above 20 s |
@@ -63,8 +64,9 @@ All of these are Terraform variables in `environments/dev/variables.tf`:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `claude_model_id` | `anthropic.claude-opus-5-5` | Quality versus cost |
-| `claude_effort` | `low` | Higher effort means more reasoning and more latency |
+| `claude_endpoint` | `runtime` | `runtime` (classic InvokeModel) or `mantle` (Messages API, newest models) |
+| `claude_model_id` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Quality versus cost |
+| `claude_effort` | `low` | `mantle` only: higher effort means more reasoning and more latency |
 | `top_k` | 5 | Chunks sent to the model |
 | `max_distance` | 0.75 | Lower is stricter: fewer but more relevant chunks, more "not found" answers |
 | `chunk_words`, `chunk_overlap_words` | 250, 40 | Smaller chunks give more precise citations but less context per chunk |

@@ -58,6 +58,8 @@ module "iam" {
   embedding_model_id      = var.embedding_model_id
   guardrail_arn           = var.enable_guardrail ? module.guardrail[0].guardrail_arn : null
   usage_table_arn         = module.dynamodb.usage_table_arn
+  claude_endpoint         = var.claude_endpoint
+  claude_model_id         = var.claude_model_id
 }
 
 module "lambda" {
@@ -78,6 +80,7 @@ module "lambda" {
     VECTOR_INDEX         = module.vectors.index_name
     EMBEDDING_MODEL_ID   = var.embedding_model_id
     EMBEDDING_DIMENSIONS = tostring(var.embedding_dimensions)
+    CLAUDE_ENDPOINT      = var.claude_endpoint
     CLAUDE_MODEL_ID      = var.claude_model_id
     FALLBACK_MODEL_ID    = var.fallback_model_id
     CLAUDE_EFFORT        = var.claude_effort

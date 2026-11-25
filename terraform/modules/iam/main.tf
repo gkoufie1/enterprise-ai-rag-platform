@@ -4,6 +4,14 @@ locals {
   embedding_model    = "arn:aws:bedrock:${var.region}::foundation-model/${var.embedding_model_id}"
   ingestion_dlq_arn  = "arn:aws:sqs:${var.region}:${var.account_id}:${var.ingestion_dlq_name}"
   mantle_project_arn = "arn:aws:bedrock-mantle:${var.region}:${var.account_id}:project/*"
+
+  # A cross-region inference profile (us.anthropic...) routes to the same foundation model in
+  # several regions, so the role needs the profile plus the model in every region it may use.
+  claude_base_model = replace(var.claude_model_id, "/^(us|eu|apac|jp|au|ca|global)[.]/", "")
+  claude_runtime_resources = [
+    "arn:aws:bedrock:${var.region}:${var.account_id}:inference-profile/${var.claude_model_id}",
+    "arn:aws:bedrock:*::foundation-model/${local.claude_base_model}",
+  ]
 }
 
 data "aws_iam_policy_document" "lambda_trust" {
@@ -99,11 +107,23 @@ data "aws_iam_policy_document" "query" {
     actions   = ["dynamodb:UpdateItem"]
     resources = [var.usage_table_arn]
   }
-  statement {
+  dynamic "statement" {
     # Claude in Amazon Bedrock (the bedrock-mantle Messages API endpoint).
-    sid       = "ClaudeInference"
-    actions   = ["bedrock-mantle:CreateInference"]
-    resources = [local.mantle_project_arn]
+    for_each = var.claude_endpoint == "mantle" ? [1] : []
+    content {
+      sid       = "ClaudeMantle"
+      actions   = ["bedrock-mantle:CreateInference"]
+      resources = [local.mantle_project_arn]
+    }
+  }
+  dynamic "statement" {
+    # Claude through classic bedrock-runtime InvokeModel and an inference profile.
+    for_each = var.claude_endpoint == "runtime" ? [1] : []
+    content {
+      sid       = "ClaudeRuntime"
+      actions   = ["bedrock:InvokeModel"]
+      resources = local.claude_runtime_resources
+    }
   }
   dynamic "statement" {
     for_each = var.guardrail_arn == null ? [] : [var.guardrail_arn]

@@ -14,20 +14,37 @@ variable "environment" {
 }
 
 # ---------------------------------------------------------------- models
-variable "claude_model_id" {
-  description = "Claude model on Claude in Amazon Bedrock (anthropic.-prefixed ID)."
+variable "claude_endpoint" {
+  description = <<-EOT
+    How the query function reaches Claude on Amazon Bedrock:
+      runtime - classic bedrock-runtime InvokeModel with an inference profile ID
+                (e.g. us.anthropic.claude-haiku-4-5-20251001-v1:0). Available to most accounts.
+      mantle  - Claude in Amazon Bedrock Messages API (e.g. anthropic.claude-opus-5-5). Needed for
+                the newest models, which AWS enables per account.
+  EOT
   type        = string
-  default     = "anthropic.claude-opus-5-5"
+  default     = "runtime"
+
+  validation {
+    condition     = contains(["runtime", "mantle"], var.claude_endpoint)
+    error_message = "claude_endpoint must be runtime or mantle."
+  }
+}
+
+variable "claude_model_id" {
+  description = "Model ID for the chosen endpoint. To upgrade: claude_endpoint = \"mantle\", claude_model_id = \"anthropic.claude-opus-5-5\"."
+  type        = string
+  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
 variable "fallback_model_id" {
-  description = "Model that retries a request the main model refuses. Empty disables the fallback."
+  description = "mantle endpoint only: model that retries a request the main model refuses (e.g. anthropic.claude-opus-4-8). Empty disables it."
   type        = string
-  default     = "anthropic.claude-opus-4-8"
+  default     = ""
 }
 
 variable "claude_effort" {
-  description = "Claude effort level. Short grounded Q&A does well at low."
+  description = "Claude effort level (mantle endpoint only). Short grounded Q&A does well at low."
   type        = string
   default     = "low"
 

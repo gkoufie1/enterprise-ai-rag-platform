@@ -56,7 +56,7 @@ flowchart LR
 2. The query Lambda checks the question with a **Bedrock Guardrail**. Prompt-injection attempts, harmful content and secrets are blocked before any model sees them.
 3. The question is embedded with **Titan Text Embeddings V2**. **S3 Vectors** returns the 5 closest chunks, and chunks further than a cosine-distance threshold are dropped.
 4. If nothing relevant remains, the API answers "not found" without calling the language model, so these requests cost almost nothing.
-5. Otherwise each chunk is sent to **Claude** (Opus 5.5 on Amazon Bedrock) as a separate document with citations enabled. The system prompt tells Claude to answer only from those documents and to treat their text as data, not instructions.
+5. Otherwise each chunk is sent to **Claude on Amazon Bedrock** as a separate document with citations enabled. The system prompt tells Claude to answer only from those documents and to treat their text as data, not instructions.
 6. The answer goes through the guardrail a second time, which masks or blocks PII. The response carries the answer, citations, sources, the model used and token usage.
 
 ### How a document is ingested
@@ -77,7 +77,7 @@ S3 sends an event to the ingestion Lambda, which:
 | Document storage | Amazon S3 | Versioned, encrypted, event source for ingestion |
 | Embeddings | Amazon Titan Text Embeddings V2 (Bedrock) | Managed, 1024-dimension normalized vectors |
 | Vector store | Amazon S3 Vectors | Pay per use with no idle cluster cost, a good fit for RAG at this scale |
-| Generation | Claude Opus 5.5 on Claude in Amazon Bedrock | Strong grounded answers with native citations; stays inside the AWS account boundary |
+| Generation | Claude on Amazon Bedrock: Haiku 4.5 by default, Opus 5.5 with one setting | Grounded answers with native citations; stays inside the AWS account boundary |
 | Safety | Amazon Bedrock Guardrails | Prompt-attack, content and PII filters on input and output |
 | API | API Gateway HTTP API + Cognito JWT authorizer | Authenticated, throttled, access-logged |
 | Compute | AWS Lambda (Python 3.13, arm64) | Serverless, scales to zero |
@@ -110,7 +110,7 @@ docs/                  architecture notes, interview guide, video script
 
 - An AWS account and the AWS CLI configured with admin credentials for the deployment.
 - Terraform 1.10 or later, Python 3.13 or later, `jq`.
-- **Bedrock model access** in your region, in the [Bedrock console](https://console.aws.amazon.com/bedrock/home#/modelaccess). You need Titan Text Embeddings V2 and Claude Opus 5.5 (`anthropic.claude-opus-5-5`); Opus 4.8 is used as the refusal fallback. Opus 5.5 may need an access request first. If you don't have it, set `claude_model_id` to a model you can use, such as `anthropic.claude-sonnet-5`.
+- **Bedrock models:** Titan Text Embeddings V2 and Claude Haiku 4.5 are on by default for most accounts. Check by opening Claude Haiku 4.5 in the Bedrock console playground (Model catalog) and sending a message. See [Choosing the Claude model](#choosing-the-claude-model) to use Opus 5.5 instead.
 
 ### 1. Create the state bucket (once per account)
 
@@ -170,12 +170,24 @@ Example response:
     }
   ],
   "sources": [{ "document_key": "remote-work-policy.md", "chunk_index": 0, "distance": 0.31 }],
-  "model": "anthropic.claude-opus-5-5",
-  "usage": { "input_tokens": 1874, "output_tokens": 96 }
+  "model": "anthropic.claude-haiku-4-5-20251001-v1:0",
+  "usage": { "input_tokens": 1149, "output_tokens": 54 },
+  "remaining_questions_today": null
 }
 ```
 
 (Illustrative; your text, distances and token counts will differ.)
+
+## Choosing the Claude model
+
+The query function can reach Claude through either of Bedrock's two endpoints, chosen with `claude_endpoint`:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `claude_endpoint = "runtime"`, `claude_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"` | Yes | Classic `bedrock-runtime` InvokeModel through a US cross-region inference profile. Available to most accounts. Fast and inexpensive. |
+| `claude_endpoint = "mantle"`, `claude_model_id = "anthropic.claude-opus-5-5"` | No | Claude in Amazon Bedrock (Messages API). Adds the `effort` setting and an automatic refusal fallback (`fallback_model_id`). |
+
+AWS enables its newest models per account, based on account age and usage history, so a new account can get "model is not available for this account" for Opus while Haiku works. This project runs on Haiku 4.5 by default for that reason. To upgrade once your account has access, set the three `mantle` values shown in `terraform.tfvars.example` and run `terraform apply`. The IAM policy switches to the matching permission automatically, and the code, citations and front end don't change.
 
 ## Web app and public demo account
 
@@ -192,7 +204,7 @@ export RAG_PASSWORD='Demo-Passw0rd-2026!'
 bash scripts/create_user.sh demo@example.com demo    # joins the "demo" group
 ```
 
-Then set `demo_login_hint` in `terraform.tfvars` (for example `"Email: demo@example.com   Password: Demo-Passw0rd-2026!"`) and apply again; the sign-in page shows it. Everyone using the demo login shares `demo_daily_limit` questions per day (default 30), so the worst-case cost is roughly 30 answers a day, about 50 cents. Regular accounts are unlimited unless you set `user_daily_limit`.
+Then set `demo_login_hint` in `terraform.tfvars` (for example `"Email: demo@example.com   Password: Demo-Passw0rd-2026!"`) and apply again; the sign-in page shows it. Everyone using the demo login shares `demo_daily_limit` questions per day (default 30), so the worst-case cost is roughly 30 answers a day, about 10 cents with Haiku 4.5. Regular accounts are unlimited unless you set `user_daily_limit`.
 
 To run the page locally, copy `frontend/config.example.js` to `frontend/config.js`, fill it in from `terraform output`, run `python -m http.server 3000` in `frontend/`, and open http://localhost:3000/.
 
@@ -239,20 +251,22 @@ With no traffic the platform costs close to nothing, because every component is 
 
 | Item | Approximate cost |
 |---|---|
-| Claude Opus 5.5 answer (about 2,000 input and 300 output tokens at 4 / 20 USD per million tokens list price) | about 1 to 2 cents per question; check Bedrock pricing for your region |
+| Claude Haiku 4.5 answer (about 2,000 input and 150 output tokens) | about 0.3 cents per question; check Bedrock pricing for your region |
+| Claude Opus 5.5 answer instead, if enabled | about 1 to 2 cents per question |
 | Titan embeddings, S3 Vectors queries, guardrail checks, Lambda, API Gateway | well under 0.1 cent per question |
 | Questions with no relevant documents | no Claude call, so close to zero |
 | Storage (S3, S3 Vectors, DynamoDB) for the sample documents | cents per month |
 | CloudFront and the static site | free tier covers a demo (1 TB and 10 million requests per month) |
 
-Ways to reduce cost: switch `claude_model_id` to Sonnet 5.5, lower `top_k`, or tighten `max_distance`.
+Ways to reduce cost: lower `top_k` or tighten `max_distance`.
 
 ## Design decisions
 
 - **Why S3 Vectors rather than OpenSearch Serverless:** OpenSearch Serverless has a minimum always-on capacity charge. S3 Vectors bills only for storage and queries, which fits a knowledge base that is queried occasionally. At hundreds of sustained queries per second, OpenSearch would be the better choice.
 - **Why not Bedrock Knowledge Bases:** the managed service would replace most of the ingestion code. Building the pipeline by hand shows how chunking, embedding, idempotency and deletes actually work, and keeps every step testable. Moving to Knowledge Bases later is straightforward.
 - **Why citations instead of asking for sources in the prompt:** native citations return the exact cited text with an index pointing to the source document. That is verifiable, while sources the model writes into its answer can be invented.
-- **Why low effort:** short grounded answers don't need deep reasoning, and lower effort cuts latency, which matters under API Gateway's 30-second limit.
+- **Why Haiku 4.5 by default:** short, document-grounded answers don't need the largest model. Haiku is fast, well inside API Gateway's 30-second limit, and inexpensive enough to leave a public demo running. The endpoint setting keeps Opus one change away.
+- **Why low effort on Opus:** the same reasoning; lower effort cuts latency when the `mantle` endpoint is used.
 
 ## Limitations and next steps
 
