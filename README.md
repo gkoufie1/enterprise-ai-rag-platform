@@ -1,328 +1,312 @@
-# Enterprise AI RAG Platform on AWS
+# Enterprise AI Knowledge Assistant on AWS
 
-A serverless retrieval-augmented generation (RAG) platform. Employees sign in to a web chat, ask questions in plain English, and get short answers grounded in internal documents, with citations to the exact passages. Everything is defined in Terraform and checked in CI.
+An AI assistant that answers employees' questions using only the company's own documents, and shows the exact sentence each answer came from. It runs entirely on AWS, costs almost nothing when idle, and is built, tested and deployed with code.
 
 ![CI](https://github.com/gkoufie1/enterprise-ai-rag-platform/actions/workflows/rag-platform.yml/badge.svg)
 
-## The problem
+**Try it live:** https://d1oaspqgya82kd.cloudfront.net. A demo login is shown on the sign-in page; it allows 30 questions a day.
 
-Policies, runbooks and onboarding guides are spread across wikis and drives. People spend time searching, support teams answer the same questions repeatedly, and generic chatbots make up answers because they have never seen the company's documents.
+<img src="docs/screenshots/02-chat-answer-citations.png" alt="The assistant answers that personal laptops may not be used for customer data and quotes the sentence from the remote work policy" width="820">
 
-## What this platform does
+---
 
-- **Ingests documents automatically.** Dropping a Markdown or text file into S3 triggers chunking and embedding. Editing or deleting the file updates or removes its vectors.
-- **Answers from the documents only.** Each question is embedded, the closest chunks are found with vector search, and Claude answers using only those chunks.
-- **Shows its sources.** Every answer comes with citations that point to the document, the chunk and the exact sentence used.
-- **Says "I don't know".** If nothing relevant is found, it says so instead of guessing.
-- **Has a web chat.** A static page on CloudFront with Cognito's hosted login, clickable citations, and a rate-limited demo account for visitors.
-- **Is secured and observable.** Cognito sign-in, Bedrock Guardrails on input and output, least-privilege IAM, alarms, a dashboard and tracing.
+## The project in 30 seconds
 
-## Live demo
+**The problem.** In most companies, policies, guides and procedures are scattered across shared drives and wikis. Employees waste time searching, support teams answer the same questions again and again, and general chatbots like ChatGPT can't help because they have never seen the company's documents. When they guess, they guess wrong.
 
-**Try it:** https://d1oaspqgya82kd.cloudfront.net. The demo login is shown on the sign-in page and allows 30 questions a day.
+**The solution.** I built an assistant that:
 
-<img src="docs/screenshots/02-chat-answer-citations.png" alt="Chat answer: personal laptops may not be used for customer data, with the cited sentence from remote-work-policy.md" width="820">
+1. **Reads the company's documents** automatically whenever one is added, changed or deleted.
+2. **Finds the right passage** when an employee asks a question, by meaning rather than exact keywords.
+3. **Writes a short answer** using Claude (Anthropic's AI model) on Amazon Bedrock, from those passages only.
+4. **Shows its source**, quoting the exact sentence it used, so anyone can check it.
+5. **Says "I couldn't find that"** instead of making something up when the documents don't cover the question.
 
-*Every answer cites the exact passage it is based on, here the "Equipment and security" section of the remote work policy.*
+**Why it matters.** This pattern is called RAG (retrieval-augmented generation). It's one of the most common ways companies put AI to work on their own data, because it keeps answers accurate, verifiable and private.
 
-<img src="docs/screenshots/01-sign-in.png" alt="Sign-in page of the Knowledge Assistant with the demo login" width="820">
+## What this project shows I can do
 
-*Sign-in page with the rate-limited demo login. Sign-in uses Cognito's hosted login page (authorization code with PKCE).*
+| Skill | Where it shows up in this project |
+|---|---|
+| **Cloud architecture (AWS)** | 12 AWS services working together, chosen for low cost and no servers to manage |
+| **Infrastructure as code (Terraform)** | Every resource is written as code in 10 reusable modules: about 70 resources, created or removed with one command |
+| **Generative AI engineering** | Document search, AI answers with citations, safety filters, and a test set that measures answer quality |
+| **Security** | Login required, least-privilege permissions, encryption everywhere, AI safety filters, usage limits |
+| **DevOps / CI/CD** | Every code change is automatically tested, checked for security problems, and previewed against the real AWS account, without storing passwords in GitHub |
+| **Monitoring and operations** | Live dashboard, email alerts, tracing, and a safety net for failed uploads |
+| **Problem solving** | Measured accuracy, found why 3 of 15 test questions failed, fixed it, and reached 15 of 15 (details below) |
+| **Cost awareness** | Close to $0/month when idle and about a third of a cent per question |
 
-## Architecture
+## How it works, in plain English
 
 ```mermaid
 flowchart LR
-    subgraph Ingestion
-        U1[Document owner] -->|upload .md / .txt| S3[(S3 documents bucket<br/>versioned, encrypted, TLS only)]
-        S3 -->|ObjectCreated / ObjectRemoved| IL[Ingestion Lambda]
-        IL -->|chunk + embed| TE[Bedrock<br/>Titan Text Embeddings V2]
-        IL -->|put / delete vectors| SV[(S3 Vectors index)]
-        IL -->|ETag + chunk count| DDB[(DynamoDB<br/>document registry)]
-        IL -. failed after retries .-> DLQ[[SQS dead-letter queue]]
+    subgraph S1 ["1. Adding documents"]
+        A[Document uploaded] --> B[Split into sections]
+        B --> C[Each section turned into a<br/>'meaning fingerprint']
+        C --> D[(Searchable library)]
     end
-
-    subgraph Query
-        U2[Employee's browser] -->|load chat page| CF[CloudFront + private S3<br/>static site]
-        U2 -->|hosted login, code + PKCE| COG[Cognito user pool]
-        U2 -->|POST /query + JWT| APIGW[API Gateway HTTP API<br/>JWT authorizer, throttling]
-        APIGW --> QL[Query Lambda]
-        QL -->|check question| GR[Bedrock Guardrails]
-        QL -->|embed question| TE
-        QL -->|top-k similarity search| SV
-        QL -->|chunks as cited documents| CL[Claude on Amazon Bedrock]
-        QL -->|check answer| GR
-        QL -->|daily quota| USE[(DynamoDB<br/>usage counters)]
+    subgraph S2 ["2. Asking a question"]
+        E[Employee signs in<br/>and asks a question] --> F[Safety check]
+        F --> G[Find the closest<br/>sections in the library]
+        G --> H[Claude writes an answer<br/>from those sections only]
+        H --> I[Safety check]
+        I --> J[Answer + quoted source]
     end
-
-    subgraph Operations
-        QL & IL --> CW[CloudWatch logs, EMF metrics,<br/>alarms, dashboard, X-Ray]
-        CW --> SNS[SNS alarm email]
-        GH[GitHub Actions] -->|lint, test, validate, scan, plan| TF[Terraform + S3 remote state]
-    end
+    D -.-> G
 ```
 
-### How a question is answered
+**Adding documents.** When someone uploads a document, the system splits it into sections, one per heading, such as "Equipment and security". It then turns each section into a "meaning fingerprint" (an *embedding*): a list of numbers that captures what the text is about. Sections about similar topics get similar fingerprints. They are stored in a searchable library (a *vector database*). If a document is edited or deleted, the library updates automatically.
 
-1. API Gateway rejects the request unless it carries a valid Cognito JWT. It also throttles traffic, which caps spend. Accounts in the `demo` group also have a daily question quota, counted in DynamoDB.
-2. The query Lambda checks the question with a **Bedrock Guardrail**. Prompt-injection attempts, harmful content and secrets are blocked before any model sees them.
-3. The question is embedded with **Titan Text Embeddings V2**. **S3 Vectors** returns the 5 closest chunks, and chunks further than a cosine-distance threshold are dropped.
-4. If nothing relevant remains, the API answers "not found" without calling the language model, so these requests cost almost nothing.
-5. Otherwise each chunk is sent to **Claude on Amazon Bedrock** as a separate document with citations enabled. The system prompt tells Claude to answer only from those documents and to treat their text as data, not instructions.
-6. The answer goes through the guardrail a second time, which masks or blocks PII. The response carries the answer, citations, sources, the model used and token usage.
+**Asking a question.** The employee signs in on the website and types a question. The question goes through a safety filter that blocks harmful requests and attempts to trick the AI. Then the question gets its own fingerprint and the system finds the sections whose fingerprints are closest. If nothing is close enough, it replies "I couldn't find that" and never calls the AI, which prevents made-up answers and saves money. Otherwise Claude writes a short answer using only those sections and marks which sentence supports each claim. The answer goes through the safety filter once more before the employee sees it.
 
-### How a document is ingested
+**Keeping it running.** A dashboard shows traffic, speed, AI usage and how often questions go unanswered. Alerts fire if something breaks, and failed uploads are kept in a queue instead of silently lost.
 
-S3 sends an event to the ingestion Lambda, which:
+## Results
 
-1. Compares the file's ETag and the current chunking and embedding settings with the DynamoDB registry, and skips files that haven't changed.
-2. Splits Markdown at its headings so each section becomes its own chunk, labeled with the document and section title. Long sections are split further into 150-word windows with a 30-word overlap. Then it embeds each chunk.
-3. Writes the vectors with deterministic keys, so a re-upload overwrites the old vectors in place.
-4. Deletes the vectors for chunk numbers that no longer exist when a document gets shorter. Deleting a file removes all of its vectors.
-5. Retries failures twice, then sends them to a dead-letter queue, which raises an alarm.
+I wrote 15 test questions with known correct answers: 12 that the documents can answer, 2 they can't (the system should say so), and 1 attempt to trick the AI (it should be blocked). The script `eval/run_eval.py` runs them against the live system and scores them.
+
+| Version | Passed | Found the right document | Cited it correctly | Answer had the key facts |
+|---|---|---|---|---|
+| First version | 12 / 15 | 9 / 12 | 9 / 12 | 9 / 12 |
+| **After the fix** | **15 / 15** | **12 / 12** | **12 / 12** | **12 / 12** |
+
+**What went wrong, and the fix.** Each short document was stored as one big block, so a narrow question like "How long do we keep audit logs?" was a weak match for a document covering five different topics, and the search picked the wrong document. I changed the system to split documents at their headings, so each topic gets its own fingerprint. That fixed all three failures, while unanswerable questions were still correctly declined.
+
+Testing on the live system also caught a safety filter that was too strict: it blocked the normal question "Can I use my personal laptop for customer data?" as rule-breaking. I tuned that filter and kept the others strict. Answers take about 1.5 seconds.
 
 ## Screenshots
 
-### Monitoring and CI
-
-<img src="docs/screenshots/03-cloudwatch-dashboard.png" alt="CloudWatch dashboard: API requests, latency, Claude tokens, no-answer and guardrail metrics, Lambda errors, ingestion and DLQ depth" width="820">
-
-*CloudWatch dashboard: API traffic and errors, p50/p95 latency, Claude token usage, answer-quality signals (no answer, guardrail blocks), Lambda errors and ingestion with DLQ depth.*
-
-<img src="docs/screenshots/04-github-actions-ci.png" alt="GitHub Actions run with lint and tests, Terraform validate, Checkov scan and Terraform plan all passing" width="820">
-
-*Every push runs lint and unit tests, Terraform validation and a Checkov scan, then a live `terraform plan` through a read-only GitHub OIDC role.*
-
-### AWS resources
-
 | | |
 |---|---|
-| <img src="docs/screenshots/05-bedrock-guardrail.png" alt="Bedrock guardrail ready" width="400"><br>*Bedrock Guardrail screening questions and answers* | <img src="docs/screenshots/07-dynamodb-document-registry.png" alt="DynamoDB document registry with five indexed documents and chunk counts" width="400"><br>*Document registry: chunk count and embedding model per document* |
-| <img src="docs/screenshots/06-api-gateway-route.png" alt="API Gateway POST /query route" width="400"><br>*HTTP API with the single `POST /query` route (JWT-protected)* | <img src="docs/screenshots/08-lambda-query-function.png" alt="Query Lambda triggered by API Gateway" width="400"><br>*Query Lambda behind API Gateway* |
-| <img src="docs/screenshots/09-cognito-users.png" alt="Cognito user pool with owner and demo users" width="400"><br>*Cognito users: an owner account and the rate-limited demo account* | |
+| <img src="docs/screenshots/01-sign-in.png" alt="Sign-in page with the demo login" width="400"><br>*Sign-in page with the demo login* | <img src="docs/screenshots/03-cloudwatch-dashboard.png" alt="Monitoring dashboard" width="400"><br>*Monitoring dashboard: traffic, speed, AI usage, unanswered and blocked questions* |
+| <img src="docs/screenshots/04-github-actions-ci.png" alt="Automated checks passing in GitHub Actions" width="400"><br>*Automated checks on every code change, all passing* | <img src="docs/screenshots/05-bedrock-guardrail.png" alt="Bedrock Guardrail" width="400"><br>*AI safety filter (Bedrock Guardrails)* |
+| <img src="docs/screenshots/07-dynamodb-document-registry.png" alt="Document registry" width="400"><br>*Document registry: each document and how many sections it was split into* | <img src="docs/screenshots/09-cognito-users.png" alt="User accounts" width="400"><br>*User accounts: an owner and a rate-limited demo account* |
+| <img src="docs/screenshots/06-api-gateway-route.png" alt="API route" width="400"><br>*The single, login-protected API endpoint* | <img src="docs/screenshots/08-lambda-query-function.png" alt="Query function" width="400"><br>*The function that answers questions* |
 
-## Tech stack
+## What it's built with
 
-| Layer | Service | Why this choice |
+| Job | AWS service or tool | In plain words |
 |---|---|---|
-| Infrastructure as code | Terraform (modules, S3 remote state with native locking) | Repeatable environments, reviewable changes |
-| Document storage | Amazon S3 | Versioned, encrypted, event source for ingestion |
-| Embeddings | Amazon Titan Text Embeddings V2 (Bedrock) | Managed, 1024-dimension normalized vectors |
-| Vector store | Amazon S3 Vectors | Pay per use with no idle cluster cost, a good fit for RAG at this scale |
-| Generation | Claude on Amazon Bedrock: Haiku 4.5 by default, Opus 5.5 with one setting | Grounded answers with native citations; stays inside the AWS account boundary |
-| Safety | Amazon Bedrock Guardrails | Prompt-attack, content and PII filters on input and output |
-| API | API Gateway HTTP API + Cognito JWT authorizer | Authenticated, throttled, access-logged |
-| Compute | AWS Lambda (Python 3.13, arm64) | Serverless, scales to zero |
-| Registry | DynamoDB (on demand, PITR) | Idempotent ingestion and clean deletes |
-| Observability | CloudWatch Logs, EMF custom metrics, alarms, dashboard, X-Ray, SNS | Tokens, latency, no-answer rate, guardrail blocks |
-| CI | GitHub Actions: ruff, pytest, terraform validate, Checkov, terraform plan via OIDC | No long-lived AWS keys in CI |
+| Website | Amazon S3 + CloudFront | Hosts the chat page securely over HTTPS, worldwide |
+| Sign-in | Amazon Cognito | Login page and user accounts; only invited users get in |
+| Front door for questions | Amazon API Gateway | Checks the login and limits how fast requests can arrive |
+| The "brains" | AWS Lambda (Python) | Small programs that run only when needed: one answers questions, one processes documents |
+| Document storage | Amazon S3 | Where documents are uploaded; versioned and encrypted |
+| Meaning fingerprints | Amazon Titan Text Embeddings (Bedrock) | Turns text into searchable fingerprints |
+| Searchable library | Amazon S3 Vectors | Stores fingerprints and finds the closest matches, with no always-on server cost |
+| Writing answers | Claude on Amazon Bedrock | Anthropic's AI model writes the answer and cites its sources |
+| Safety | Amazon Bedrock Guardrails | Blocks harmful content, trick attempts and sensitive data such as card numbers |
+| Bookkeeping | Amazon DynamoDB | Tracks which documents are indexed, and counts demo questions per day |
+| Monitoring | CloudWatch, X-Ray, SNS | Dashboard, alerts by email, and request tracing |
+| Infrastructure as code | Terraform | Every AWS resource above, written as code |
+| Automation | GitHub Actions | Tests, security scan and a deployment preview on every change |
 
-## Repository layout
+**About the AI model.** The project runs on **Claude Haiku 4.5**, a fast and inexpensive model that is very good at short answers grounded in documents. It's built to switch to **Claude Opus 5.5** by changing one setting. AWS enables its newest models per account based on account history; my account wasn't eligible yet, so I made the model configurable instead of waiting.
 
+## Security, in plain words
+
+- **You must sign in** to ask anything. Self sign-up is off, so an administrator creates every account.
+- **Least privilege:** each part of the system can touch only the exact resources it needs, nothing more.
+- **Encrypted everywhere:** data is encrypted when stored and when sent, and storage buckets refuse unencrypted connections.
+- **AI safety filters** check both the question and the answer.
+- **The AI is told to treat documents as information, not instructions,** so a document can't hijack it.
+- **Cost protection:** traffic is rate-limited, questions are capped at 1,000 characters, and the public demo account is limited to 30 questions a day.
+- **The website** sends strict browser security headers, and the demo account can't change its own password.
+- **No passwords in GitHub:** the automated checks sign in to AWS with short-lived credentials (OIDC).
+
+## Cost
+
+| Item | Cost |
+|---|---|
+| Running with no traffic | About $0 per month (everything is pay-per-use and within free allowances) |
+| Each question answered | About $0.003 |
+| Questions with no matching documents | Almost $0 (the AI is never called) |
+| Worst case for the public demo (30 questions every day) | About $3 per month |
+
+---
+
+## Commands
+
+Every command you need to run, use and maintain the project, with what it does. Run them from the project folder in a Bash terminal (Git Bash on Windows) unless a step says otherwise.
+
+### One-time setup
+
+**What you need installed:** an AWS account, the [AWS CLI](https://aws.amazon.com/cli/) signed in with admin rights, [Terraform](https://developer.hashicorp.com/terraform/install) 1.10 or later, and Python 3.13 or later.
+
+```bash
+aws sts get-caller-identity
 ```
-frontend/              chat page: index.html, app.js, styles.css (no build step)
-app/
-  rag_core/            shared code: chunking, embeddings, vector keys
-  ingestion/handler.py S3 event -> chunks -> embeddings -> S3 Vectors
-  query/handler.py     guardrail -> retrieval -> Claude with citations -> guardrail
-terraform/
-  bootstrap/           state bucket + GitHub OIDC plan role (applied once)
-  environments/dev/    wires the modules together
-  modules/             s3, vectors, dynamodb, auth, guardrail, iam, lambda, apigateway, monitoring, frontend
-tests/                 unit tests with fake AWS and Claude clients
-eval/                  15-question evaluation set and scoring script
-scripts/               build, upload, create user, get token, query, re-ingest
-sample-docs/           five fictional company documents to try it with
-docs/                  architecture notes, interview guide, video script
-```
-
-## Deploy it
-
-### Prerequisites
-
-- An AWS account and the AWS CLI configured with admin credentials for the deployment.
-- Terraform 1.10 or later, Python 3.13 or later, `jq`.
-- **Bedrock models:** Titan Text Embeddings V2 and Claude Haiku 4.5 are on by default for most accounts. Check by opening Claude Haiku 4.5 in the Bedrock console playground (Model catalog) and sending a message. See [Choosing the Claude model](#choosing-the-claude-model) to use Opus 5.5 instead.
-
-### 1. Create the state bucket (once per account)
+Shows which AWS account and user you're signed in as. Run it first to be sure you're deploying to the right account.
 
 ```bash
 cd terraform/bootstrap
 terraform init
-terraform apply -var="github_repository=gkoufie1/enterprise-ai-rag-platform"   # omit the variable to skip the CI plan role
+terraform apply -var="github_repository=gkoufie1/enterprise-ai-rag-platform" -var="create_github_oidc_provider=false"
+cd ../..
 ```
+Creates two things, once per AWS account: an S3 bucket that stores Terraform's record of everything it built (the *state*), and a read-only role that GitHub uses to preview changes. Use `create_github_oidc_provider=true` if your account has never been connected to GitHub Actions before. Keep the `terraform.tfstate` file this creates; it isn't in git.
 
-### 2. Build and deploy
+### Build and deploy
 
 ```bash
-bash scripts/build_lambdas.sh                        # Lambda packages for Linux arm64
+bash scripts/build_lambdas.sh
+```
+Packages the Python code and its libraries into the two Lambda functions, ready to upload. Re-run it whenever you change anything in `app/`.
 
+```bash
 cd terraform/environments/dev
-cp backend.hcl.example backend.hcl                   # set the bucket from step 1
-cp terraform.tfvars.example terraform.tfvars         # set alarm_email, allowed_origins
+cp backend.hcl.example backend.hcl
+cp terraform.tfvars.example terraform.tfvars
+```
+Creates your two private settings files (both are git-ignored). In `backend.hcl`, set the state bucket name from the bootstrap step. In `terraform.tfvars`, set your options, such as the alert email and the demo login text.
+
+```bash
 terraform init -backend-config=backend.hcl
+```
+Prepares Terraform: downloads the AWS plugin and connects to the state bucket. Needed once, or after changing `backend.hcl`.
+
+```bash
 terraform plan -out=tfplan
+```
+Shows exactly what Terraform will create, change or delete, without touching anything. Always read this before applying.
+
+```bash
 terraform apply tfplan
 ```
-
-Confirm the SNS subscription email so alarms reach you.
-
-### 3. Load documents and open the web app
+Builds or updates everything on AWS to match the code: about 60 resources on the first run, taking roughly 5 minutes (mostly CloudFront).
 
 ```bash
-bash scripts/upload_docs.sh                          # ingestion starts automatically
+terraform output
+```
+Prints the important addresses: the website URL, the API URL, bucket names, the user pool ID and the dashboard link.
 
+```bash
+cd ../../..
+```
+Returns to the project folder for the commands below.
+
+### Load documents and create users
+
+```bash
+bash scripts/upload_docs.sh
+```
+Uploads everything in `sample-docs/` to the documents bucket. Each upload automatically triggers processing; files you deleted locally are removed from the library too. Pass a folder to upload your own documents: `bash scripts/upload_docs.sh path/to/folder`.
+
+```bash
 export RAG_PASSWORD='Choose-a-Strong-Passw0rd!'
-bash scripts/create_user.sh you@example.com          # your own account, no daily limit
-terraform -chdir=terraform/environments/dev output -raw frontend_url
+bash scripts/create_user.sh you@example.com
 ```
-
-Open the URL, choose **Sign in**, and use the account you just created. CloudFront can take a few minutes to start serving a new distribution.
-
-### 4. Or call the API from the terminal
-
-```bash
-
-export RAG_TOKEN="$(bash scripts/get_token.sh you@example.com)"
-
-bash scripts/query_api.sh "Can I use my personal laptop for customer data when working remotely?"
-```
-
-Example response:
-
-```json
-{
-  "question": "Can I use my personal laptop for customer data when working remotely?",
-  "answer": "No. Remote work must be done on a company-managed laptop, and personal devices may not be used to access customer data...",
-  "citations": [
-    {
-      "document_key": "remote-work-policy.md",
-      "chunk_index": 0,
-      "cited_text": "Personal computers, tablets and phones may not be used to access customer data."
-    }
-  ],
-  "sources": [{ "document_key": "remote-work-policy.md", "chunk_index": 0, "distance": 0.31 }],
-  "model": "anthropic.claude-haiku-4-5-20251001-v1:0",
-  "usage": { "input_tokens": 1149, "output_tokens": 54 },
-  "remaining_questions_today": null
-}
-```
-
-(Illustrative; your text, distances and token counts will differ.)
-
-## Choosing the Claude model
-
-The query function can reach Claude through either of Bedrock's two endpoints, chosen with `claude_endpoint`:
-
-| Setting | Default | Notes |
-|---|---|---|
-| `claude_endpoint = "runtime"`, `claude_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"` | Yes | Classic `bedrock-runtime` InvokeModel through a US cross-region inference profile. Available to most accounts. Fast and inexpensive. |
-| `claude_endpoint = "mantle"`, `claude_model_id = "anthropic.claude-opus-5-5"` | No | Claude in Amazon Bedrock (Messages API). Adds the `effort` setting and an automatic refusal fallback (`fallback_model_id`). |
-
-AWS enables its newest models per account, based on account age and usage history, so a new account can get "model is not available for this account" for Opus while Haiku works. This project runs on Haiku 4.5 by default for that reason. To upgrade once your account has access, set the three `mantle` values shown in `terraform.tfvars.example` and run `terraform apply`. The IAM policy switches to the matching permission automatically, and the code, citations and front end don't change.
-
-## Web app and public demo account
-
-The chat page lives in `frontend/` as three static files with no build step. Terraform uploads them to a private S3 bucket served only through CloudFront, and generates `config.js` with the API URL and Cognito settings.
-
-- **Sign-in:** Cognito's hosted login page, using the authorization-code flow with PKCE. The browser never handles a client secret, and tokens are kept in `sessionStorage`.
-- **Answers:** each answer shows its cited passages under a "sources cited" toggle, plus a badge when the guardrail blocked something.
-- **Safe rendering:** API text is inserted with `textContent`, and CloudFront adds a strict Content-Security-Policy and other security headers.
-
-To let visitors (for example, recruiters) try it without giving out a personal account:
+Creates a login with no daily limit. The password is read from `RAG_PASSWORD` so it doesn't end up in your command history. It needs 12+ characters with upper and lower case, a number and a symbol.
 
 ```bash
 export RAG_PASSWORD='Demo-Passw0rd-2026!'
-bash scripts/create_user.sh demo@example.com demo    # joins the "demo" group
+bash scripts/create_user.sh demo@example.com demo
 ```
+Creates the public demo login. The word `demo` puts it in the demo group, which is limited to 30 questions a day. To show it on the sign-in page, set `demo_login_hint` in `terraform.tfvars` and run `terraform apply` again.
 
-Then set `demo_login_hint` in `terraform.tfvars` (for example `"Email: demo@example.com   Password: Demo-Passw0rd-2026!"`) and apply again; the sign-in page shows it. Everyone using the demo login shares `demo_daily_limit` questions per day (default 30), so the worst-case cost is roughly 30 answers a day, about 10 cents with Haiku 4.5. Regular accounts are unlimited unless you set `user_daily_limit`.
+### Use it
 
-To run the page locally, copy `frontend/config.example.js` to `frontend/config.js`, fill it in from `terraform output`, run `python -m http.server 3000` in `frontend/`, and open http://localhost:3000/.
+Open the website from `terraform output -raw frontend_url` (run inside `terraform/environments/dev`), choose **Sign in**, and ask a question. To use it from the terminal instead:
 
-## Evaluation
+```bash
+export RAG_TOKEN="$(bash scripts/get_token.sh you@example.com)"
+```
+Signs in and saves a temporary access pass (a token, valid for one hour) for the commands below. It uses the password in `RAG_PASSWORD`.
 
-`eval/questions.jsonl` holds 15 cases: 12 answerable questions with the document that should be cited and keywords the answer must contain, 2 questions the documents can't answer (the system should abstain), and 1 prompt-injection attempt (the guardrail should block it).
+```bash
+bash scripts/query_api.sh "Can I use my personal laptop for customer data when working remotely?"
+```
+Asks a question and prints the full response: the answer, the quoted sources, which model answered, and how many questions the account has left today.
+
+### Check quality
+
+```bash
+pip install -r requirements-dev.txt
+```
+Installs the tools for testing and code checks.
+
+```bash
+pytest
+```
+Runs 38 automated tests in a few seconds. They use stand-ins for AWS and the AI, so they cost nothing and need no internet.
+
+```bash
+ruff check . && ruff format --check .
+```
+Checks the Python code for errors and consistent formatting.
 
 ```bash
 export RAG_API_URL="$(terraform -chdir=terraform/environments/dev output -raw query_api_url)"
 python eval/run_eval.py
 ```
+Runs the 15 test questions against the live system and prints a pass/fail table with accuracy scores. It costs about 5 cents. Re-run it after any change to how documents are split or searched, or to the model.
 
-It reports retrieval hit rate, citation accuracy, keyword accuracy, correct abstentions and blocked attacks, then writes `eval/results.json`. Re-run it after changing the chunk size, `top_k`, the distance threshold, the model or the prompt, and compare.
-
-### Results on the deployed system (Claude Haiku 4.5)
-
-| Version | Passed | Retrieval | Citation | Keywords | Abstained correctly | Injection blocked |
-|---|---|---|---|---|---|---|
-| Fixed 250-word chunks, cutoff 0.75 | 12 / 15 | 9 / 12 | 9 / 12 | 9 / 12 | 2 / 2 | 1 / 1 |
-| **Section-aware chunks, cutoff 0.70** | **15 / 15** | **12 / 12** | **12 / 12** | **12 / 12** | **2 / 2** | **1 / 1** |
-
-The first run failed three questions that never reached the model. Each short document had become a single chunk, so a narrow question ("How long do we keep audit logs?") was a weak match for a document covering five topics, and the search ranked the wrong document first. Splitting at Markdown headings gave each topic its own embedding: the cosine distance of the right section fell from 0.76–0.86 to 0.42–0.59, while unanswerable questions stayed at 0.79 or more. That gap is why the cutoff moved to 0.70. Answers took about 1.5 seconds; abstentions and blocks about 0.5 seconds.
-
-The guardrail also needed tuning on the live system: at the strictest setting its misconduct filter blocked "Can I use my personal laptop to look at customer data?", a normal policy question, so that filter now runs at medium strength.
-
-## Testing and CI
+### Look after it
 
 ```bash
-pip install -r requirements-dev.txt
-ruff check . && pytest
+MSYS_NO_PATHCONV=1 aws logs tail /aws/lambda/enterprise-ai-rag-dev-ingestion --follow
 ```
-
-The unit tests replace AWS and Claude with in-memory fakes. They cover chunking, idempotent re-ingestion, stale-vector cleanup, deletes, citation mapping, the distance filter, both guardrail checks, refusals and request validation and the daily demo quota.
-
-On every push and pull request, GitHub Actions runs:
-
-1. ruff and pytest.
-2. `terraform fmt` and `validate` for both stacks.
-3. A Checkov security scan of the Terraform.
-4. `terraform plan` against the real account, using a read-only role assumed through GitHub OIDC with no stored keys. This job runs once the repository variables `AWS_PLAN_ROLE_ARN` and `TF_STATE_BUCKET` are set from the bootstrap outputs.
-
-## Security
-
-- **Authentication:** Cognito JWT authorizer on the only route. Self sign-up is off, the password policy is strong, and optional TOTP MFA is available.
-- **Least privilege:** one IAM role per function, scoped to its own log group, bucket, table, vector index, embedding model and guardrail.
-- **Data protection:** encryption at rest everywhere, a bucket policy that denies non-TLS requests, S3 Block Public Access, versioning, and DynamoDB point-in-time recovery.
-- **AI safety:** guardrails on input and output; the prompt treats documents as data; answers come only from retrieved context and abstain otherwise; a refusal fallback keeps users from getting an empty answer.
-- **Abuse and cost control:** API throttling (5 requests per second, burst 10), a daily question quota for demo accounts, a 1,000-character question limit, and a cap on output tokens.
-- **Web app:** private S3 origin behind CloudFront with origin access control, HTTPS only, Content-Security-Policy, HSTS and anti-framing headers. The demo login can't change its own password, because the web client's tokens don't carry the account-management scope.
-- **Auditability:** API access logs with the caller's identity, structured query logs, and X-Ray traces.
-
-## Cost
-
-With no traffic the platform costs close to nothing, because every component is serverless and billed per use. Expect roughly 0 to 3 USD per month, mostly CloudWatch, and less within the free tiers.
-
-| Item | Approximate cost |
-|---|---|
-| Claude Haiku 4.5 answer (about 2,000 input and 150 output tokens) | about 0.3 cents per question; check Bedrock pricing for your region |
-| Claude Opus 5.5 answer instead, if enabled | about 1 to 2 cents per question |
-| Titan embeddings, S3 Vectors queries, guardrail checks, Lambda, API Gateway | well under 0.1 cent per question |
-| Questions with no relevant documents | no Claude call, so close to zero |
-| Storage (S3, S3 Vectors, DynamoDB) for the sample documents | cents per month |
-| CloudFront and the static site | free tier covers a demo (1 TB and 10 million requests per month) |
-
-Ways to reduce cost: lower `top_k` or tighten `max_distance`.
-
-## Design decisions
-
-- **Why S3 Vectors rather than OpenSearch Serverless:** OpenSearch Serverless has a minimum always-on capacity charge. S3 Vectors bills only for storage and queries, which fits a knowledge base that is queried occasionally. At hundreds of sustained queries per second, OpenSearch would be the better choice.
-- **Why not Bedrock Knowledge Bases:** the managed service would replace most of the ingestion code. Building the pipeline by hand shows how chunking, embedding, idempotency and deletes actually work, and keeps every step testable. Moving to Knowledge Bases later is straightforward.
-- **Why citations instead of asking for sources in the prompt:** native citations return the exact cited text with an index pointing to the source document. That is verifiable, while sources the model writes into its answer can be invented.
-- **Why Haiku 4.5 by default:** short, document-grounded answers don't need the largest model. Haiku is fast, well inside API Gateway's 30-second limit, and inexpensive enough to leave a public demo running. The endpoint setting keeps Opus one change away.
-- **Why low effort on Opus:** the same reasoning; lower effort cuts latency when the `mantle` endpoint is used.
-
-## Limitations and next steps
-
-- Only `.md` and `.txt` files are ingested; PDF and Word files would need a text-extraction step (for example Amazon Textract or a PDF library).
-- One knowledge base for everyone. Per-department access control could filter vector search on a metadata field that maps to Cognito groups.
-- Single-turn questions with no conversation memory.
-- The site uses the default `*.cloudfront.net` address; a custom domain needs an ACM certificate and a DNS record.
-- Answers are not streamed. Streaming would need Lambda response streaming or WebSockets instead of the HTTP API.
-
-## Clean up
+Shows document-processing logs live: useful right after uploading. Swap `ingestion` for `query` to watch questions being answered. (`MSYS_NO_PATHCONV=1` stops Git Bash on Windows from mangling the `/aws/...` path; it does nothing elsewhere.)
 
 ```bash
-cd terraform/environments/dev && terraform destroy
+bash scripts/reingest.sh remote-work-policy.md
+```
+Re-processes one document by hand, for example after a "failed upload" alert. Normally you never need it, because uploads are processed automatically.
+
+```bash
+aws sqs get-queue-attributes --queue-url "$(terraform -chdir=terraform/environments/dev output -raw ingestion_dlq_url)" --attribute-names ApproximateNumberOfMessages
+```
+Counts uploads that failed even after retries and are waiting in the safety-net queue. It should be 0.
+
+```bash
+aws ce get-cost-and-usage --time-period Start=2026-11-01,End=2026-11-30 --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE
+```
+Shows this month's AWS cost per service. Change the dates to the current month. Cost data can lag by up to a day.
+
+### Change the AI model
+
+In `terraform/environments/dev/terraform.tfvars`, add:
+
+```hcl
+claude_endpoint   = "mantle"
+claude_model_id   = "anthropic.claude-opus-5-5"
+fallback_model_id = "anthropic.claude-opus-4-8"
 ```
 
-Set `force_destroy = true` first if the buckets still hold data. The state bucket in `terraform/bootstrap` is protected from deletion on purpose.
+Then run `terraform apply` in that folder. This switches from Claude Haiku 4.5 to Claude Opus 5.5, once AWS has enabled Opus for your account. Permissions update automatically. Delete the three lines and apply again to switch back.
+
+### Remove everything
+
+```bash
+cd terraform/environments/dev
+terraform destroy
+```
+Deletes every AWS resource the project created, so it stops costing anything. It asks for confirmation first. Set `force_destroy = true` in `terraform.tfvars` and apply before destroying if the buckets still hold files. The state bucket from the bootstrap step is protected from deletion on purpose.
+
+---
+
+## Project layout
+
+```
+frontend/        the chat website (HTML, CSS, JavaScript; no build step)
+app/
+  ingestion/     processes uploaded documents
+  query/         answers questions
+  rag_core/      shared code: splitting documents, fingerprints
+terraform/
+  bootstrap/     one-time setup: state bucket and GitHub access role
+  environments/  the dev environment, which wires the modules together
+  modules/       10 reusable building blocks (website, login, API, storage, ...)
+tests/           38 automated tests
+eval/            15 test questions and the scoring script
+scripts/         helper commands (build, upload, create user, ask a question, ...)
+sample-docs/     five made-up company documents to try it with
+docs/            architecture notes, interview guide, video script, screenshots
+```
+
+## Want more detail?
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): data model, permission matrix, failure handling and tuning settings.
+- [docs/INTERVIEW_EXPLANATION.md](docs/INTERVIEW_EXPLANATION.md): how to explain the project, and answers to common interview questions.
+- [docs/YOUTUBE_WALKTHROUGH.md](docs/YOUTUBE_WALKTHROUGH.md): script for a video demo.
