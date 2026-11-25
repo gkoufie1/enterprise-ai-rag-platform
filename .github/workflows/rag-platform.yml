@@ -91,6 +91,7 @@ jobs:
           # so the plan compares against the same settings. Do not put secrets in it.
           TFVARS: ${{ vars.TFVARS_DEV }}
         run: |
+          set -o pipefail  # otherwise `| tee` hides a failed plan
           if [ -n "$TFVARS" ]; then printf '%s\n' "$TFVARS" > terraform.tfvars; fi
           terraform plan -input=false -lock=false -no-color -var="aws_region=${AWS_REGION}" | tee plan.txt
           {

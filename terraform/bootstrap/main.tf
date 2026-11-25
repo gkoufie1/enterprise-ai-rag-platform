@@ -63,6 +63,30 @@ resource "aws_s3_bucket_public_access_block" "state" {
   restrict_public_buckets = true
 }
 
+data "aws_iam_policy_document" "state_tls_only" {
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.state.arn, "${aws_s3_bucket.state.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "state" {
+  bucket     = aws_s3_bucket.state.id
+  policy     = data.aws_iam_policy_document.state_tls_only.json
+  depends_on = [aws_s3_bucket_public_access_block.state]
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "state" {
   bucket = aws_s3_bucket.state.id
   rule {
@@ -107,10 +131,15 @@ data "aws_iam_policy_document" "github_trust" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # GitHub issues the classic subject (repo:owner/name:...) or, for repositories using
+    # immutable subjects, repo:owner@<owner id>/name@<repo id>:... Accept both.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:*"]
+      values = [
+        "repo:${var.github_repository}:*",
+        "repo:${split("/", var.github_repository)[0]}@*/${split("/", var.github_repository)[1]}@*:*",
+      ]
     }
   }
 }
@@ -137,6 +166,12 @@ data "aws_iam_policy_document" "state_read" {
   statement {
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.state.arn}/*"]
+  }
+  # Newer services that the ReadOnlyAccess managed policy does not cover yet.
+  statement {
+    sid       = "ReadS3Vectors"
+    actions   = ["s3vectors:Get*", "s3vectors:List*"]
+    resources = ["*"]
   }
 }
 
